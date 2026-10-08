@@ -70,7 +70,7 @@ body.seated .bg-layer img.hires.loaded { opacity: 1; }
   inset: auto;
   -webkit-mask-image: linear-gradient(90deg, transparent, #000 10%); mask-image: linear-gradient(90deg, transparent, #000 10%);
 }
-.rain { position: absolute; pointer-events: none; mix-blend-mode: screen; opacity: .55; }
+.rain { position: absolute; pointer-events: none; opacity: .7; }
 
 /* ---------- экран ---------- */
 .tv-screen {
@@ -149,6 +149,13 @@ body.reduced .tv-embed .crt-flicker { animation: none; opacity: 0; }
 
 .dust { mix-blend-mode: screen; }
 .dim { inset: 0; background: #0b0f16; opacity: 0; }
+/* порыв: свет из-под приподнятого тюля ложится полосой на пол и шкаф */
+.gust-light { position: absolute; inset: 0; pointer-events: none; opacity: 0; mix-blend-mode: screen;
+  background:
+    radial-gradient(ellipse 30% 48% at 93% 46%, rgba(var(--gust-rgb, 255,236,200), .75), rgba(var(--gust-rgb, 255,236,200), 0) 100%),
+    radial-gradient(ellipse 55% 26% at 62% 92%, rgba(var(--gust-rgb, 255,236,200), .55), rgba(var(--gust-rgb, 255,236,200), 0) 100%),
+    linear-gradient(200deg, rgba(var(--gust-rgb, 255,236,200), 0) 30%, rgba(var(--gust-rgb, 255,236,200), .22) 55%, rgba(var(--gust-rgb, 255,236,200), 0) 80%); }
+.glow, .siren, .dust, .dim, .flash, .gust-light { position: absolute; pointer-events: none; }
 .flash { inset: 0; opacity: 0; mix-blend-mode: screen;
   background: radial-gradient(ellipse 70% 90% at 93% 30%, rgba(225,235,255,.95), rgba(200,215,255,.4) 45%, rgba(180,200,255,.12)); }
 

@@ -119,15 +119,16 @@ function placeEl(el, z) {
 /* ==========================================================================
    2. СЦЕНА: время суток (торшер) × погода (окно), фон, тюль на ветру
    ========================================================================== */
-const sceneOf = (time, weather) => (weather !== 'clear' && time !== 'evening') ? 'overcast' : time;
+const sceneOf = (time, weather) => (weather === 'clear' || time === 'evening') ? time : (weather === 'downpour' ? 'storm' : 'overcast');
 const sceneFx = () => {
   const f = Object.assign({}, CFG.light.scenes[state.scene]);
-  f.dim = (state.mode === 'sunset' && state.weather !== 'clear' ? 0.22 : 0) + (state.weather === 'downpour' ? 0.12 : 0);
+  f.dim = state.mode === 'evening' && state.weather === 'downpour' ? 0.1 : 0;
   return f;
 };
 
 const BG = {
   layers: {}, bds: {}, z: 1, current: null,
+  DISP: 90,                                   // общий масштаб смещения; волны и «парус» дозируются коэффициентами
   init() {
     const bg = $('#bg'), bd = $('.backdrop');
     for (const [scene, def] of Object.entries(CFG.backgrounds)) {
@@ -191,9 +192,9 @@ const BG = {
 
   /* Карта смещения. R — волны по горизонтали, G — подъём подола на порывах.
      Ширина карты кратна периоду, поэтому бегущая волна зацикливается без шва. */
-  makeMaps(zw, zh, P) {
+  makeMaps(zw, zh, P, ext = 0) {
     const sx = 0.5, Pp = Math.round(P * sx);
-    const w = Math.ceil(zw * sx / Pp) * Pp + Pp * 2, h = Math.ceil(zh * sx);
+    const w = Math.ceil((zw + ext) * sx / Pp) * Pp + Pp * 2, h = Math.ceil(zh * sx);
     const c = document.createElement('canvas'); c.width = w; c.height = h;
     const g = c.getContext('2d'); const id = g.createImageData(w, h); const d = id.data;
     for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
@@ -204,41 +205,70 @@ const BG = {
       d[i] = 128 + 127 * clamp(v, -1, 1); d[i + 1] = 128 - 70 * lift; d[i + 2] = 128; d[i + 3] = 255;
     }
     g.putImageData(id, 0, 0);
-    const ew = Math.ceil(zw * sx);
+    const ew = Math.ceil((zw + ext) * sx), ex = Math.round(ext * sx), ew0 = ew - ex;
     const c2 = document.createElement('canvas'); c2.width = ew; c2.height = h;
     const g2 = c2.getContext('2d'); const id2 = g2.createImageData(ew, h); const e = id2.data;
     for (let y = 0; y < h; y++) for (let x = 0; x < ew; x++) {
-      const xn = x / ew, yn = y / h;
-      const env = smooth(0, 0.14, xn) * (1 - smooth(0.95, 1, xn)) * smooth(0.03, 0.75, yn) * (1 - smooth(0.93, 0.995, yn));
+      const xn = (x - ex) / ew0, yn = y / h;
+      const env = xn < 0 ? 0 : smooth(0, 0.14, xn) * (1 - smooth(0.95, 1, xn)) * smooth(0.03, 0.75, yn) * (1 - smooth(0.93, 0.995, yn));
       const i = (y * ew + x) * 4, v = 255 * env;
       e[i] = v; e[i + 1] = v; e[i + 2] = v; e[i + 3] = 255;
     }
     g2.putImageData(id2, 0, 0);
-    return { wave: c.toDataURL(), env: c2.toDataURL(), ww: w / sx, period: Pp / sx };
+    // «парус»: на порыве подол выгибается внутрь комнаты (влево), верх на карнизе неподвижен,
+    // правый край у стены не двигается, по ширине — две волны складок
+    // карта шире окна на ext: подол может заходить на тяжёлую штору слева
+    const lw = Math.ceil((zw + ext) * sx), e0 = ext / (zw + ext);
+    const c3 = document.createElement('canvas'); c3.width = lw; c3.height = h;
+    const g3 = c3.getContext('2d'); const id3 = g3.createImageData(lw, h); const l = id3.data;
+    for (let y = 0; y < h; y++) for (let x = 0; x < lw; x++) {
+      const xn = x / lw, yn = y / h;
+      const prof = Math.pow(smooth(0.28, 1, yn), 2) * (1 - smooth(0.8, 1, xn)) * smooth(0, e0 + 0.12, xn);
+      const folds = 0.8 + 0.2 * Math.sin(xn * 9 + yn * 3);
+      const v = 0.5 + 0.47 * prof * folds;
+      const i = (y * ew + x) * 4;
+      l[i] = 255 * v; l[i + 1] = 128 + 40 * prof; l[i + 2] = 128; l[i + 3] = 255;
+    }
+    g3.putImageData(id3, 0, 0);
+    // мягкая маска: фильтрованный слой плавно растворяется к краям, чтобы не было шва
+    const c4 = document.createElement('canvas'); c4.width = lw; c4.height = h;
+    const g4 = c4.getContext('2d'); const id4 = g4.createImageData(lw, h); const q = id4.data;
+    for (let y = 0; y < h; y++) for (let x = 0; x < lw; x++) {
+      const xn = x / lw, yn = y / h, i = (y * lw + x) * 4;
+      q[i] = q[i + 1] = q[i + 2] = 255; q[i + 3] = 255 * smooth(0, e0 * 0.7, xn) * (1 - smooth(0.97, 1, yn));
+    }
+    g4.putImageData(id4, 0, 0);
+    return { wave: c.toDataURL(), env: c2.toDataURL(), lean: c3.toDataURL(), mask: c4.toDataURL(), ww: w / sx, period: Pp / sx };
   },
   addSway(layer, scene) {
     if (REDUCED) return;
     const old = layer.querySelector('svg.sway'); if (old) old.remove();
     const z = zpx(CFG.zones.window);
-    if (!this._maps || this._mapsFor !== JSON.stringify(z)) { this._maps = this.makeMaps(z.w, z.h, 120); this._mapsFor = JSON.stringify(z); }
+    const ext = Math.min(z.x, 150);
+    if (!this._maps || this._mapsFor !== JSON.stringify(z)) { this._maps = this.makeMaps(z.w, z.h, 120, ext); this._mapsFor = JSON.stringify(z); }
     const m = this._maps, id = 'sway-' + scene, href = CFG.backgrounds[scene].image;
     const svg = `
 <svg class="sway" viewBox="0 0 ${IMG_W} ${IMG_H}" preserveAspectRatio="none" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
   <defs>
     <filter id="${id}" filterUnits="userSpaceOnUse" primitiveUnits="userSpaceOnUse" color-interpolation-filters="sRGB"
-            x="${z.x}" y="${z.y}" width="${z.w}" height="${z.h}">
-      <feImage href="${m.wave}" xlink:href="${m.wave}" x="${z.x}" y="${z.y}" width="${m.ww}" height="${z.h}" preserveAspectRatio="none" result="wave0"/>
+            x="${z.x - ext}" y="${z.y}" width="${z.w + ext}" height="${z.h}">
+      <feImage href="${m.wave}" xlink:href="${m.wave}" x="${z.x - ext}" y="${z.y}" width="${m.ww}" height="${z.h}" preserveAspectRatio="none" result="wave0"/>
       <feOffset in="wave0" dx="0" result="wave"/>
-      <feImage href="${m.env}" xlink:href="${m.env}" x="${z.x}" y="${z.y}" width="${z.w}" height="${z.h}" preserveAspectRatio="none" result="env"/>
-      <feComposite in="wave" in2="env" operator="arithmetic" k1="1" k2="0" k3="-0.5" k4="0.5" result="map0"/>
+      <feImage href="${m.env}" xlink:href="${m.env}" x="${z.x - ext}" y="${z.y}" width="${z.w + ext}" height="${z.h}" preserveAspectRatio="none" result="env"/>
+      <feComposite in="wave" in2="env" operator="arithmetic" k1="0.08" k2="0" k3="-0.04" k4="0.5" result="mapW"/>
+      <feImage href="${m.lean}" xlink:href="${m.lean}" x="${z.x - ext}" y="${z.y}" width="${z.w + ext}" height="${z.h}" preserveAspectRatio="none" result="lean"/>
+      <feComposite in="mapW" in2="lean" operator="arithmetic" k1="0" k2="1" k3="0" k4="0" result="map0"/>
       <feGaussianBlur in="map0" stdDeviation="2.5" result="map"/>
-      <feDisplacementMap in="SourceGraphic" in2="map" scale="6" xChannelSelector="R" yChannelSelector="G"/>
+      <feDisplacementMap in="SourceGraphic" in2="map" scale="${BG.DISP}" xChannelSelector="R" yChannelSelector="G" result="disp"/>
+      <feImage href="${m.mask}" xlink:href="${m.mask}" x="${z.x - ext}" y="${z.y}" width="${z.w + ext}" height="${z.h}" preserveAspectRatio="none" result="mask"/>
+      <feComposite in="disp" in2="mask" operator="in"/>
     </filter>
   </defs>
   <image href="${href}" xlink:href="${href}" x="0" y="0" width="${IMG_W}" height="${IMG_H}" preserveAspectRatio="none" filter="url(#${id})"/>
 </svg>`;
     layer.insertAdjacentHTML('beforeend', svg);
     layer._off = layer.querySelector('feOffset'); layer._disp = layer.querySelector('feDisplacementMap');
+    const comps = layer.querySelectorAll('feComposite'); layer._amp = comps[0]; layer._lean = comps[1];
   },
   rebuildSway() { for (const [s, l] of Object.entries(this.layers)) if (!l.querySelector('video')) this.addSway(l, s); },
 };
@@ -268,14 +298,31 @@ const Wind = {
     if (t - this.lastApply > 33) {                                    // ~30 к/с для фильтра
       this.lastApply = t;
       const open = 0.25 + 0.75 * clamp(state.vent / 0.7, 0, 1);          // закрытая форточка — ветра почти нет
-      const scale = ((W.scaleCalm + W.scaleGust * this.w) * open).toFixed(2), P = BG._maps ? BG._maps.period : 120;
+      const a = ((W.scaleCalm + W.scaleGust * this.w) * open / BG.DISP);   // амплитуда мелких волн
+      this.billow = lerp(this.billow || 0, clamp(g / Math.max(0.01, W.gustMax), 0, 1.4) * W.billow * open, Math.min(1, dt / 90));
+      const b = this.billow, P = BG._maps ? BG._maps.period : 120;
       const dx = (-(this.phase % P)).toFixed(2);
       for (const l of Object.values(BG.layers)) {
         if (l.classList.contains('is-hidden') || !l._disp) continue;
-        l._disp.setAttribute('scale', scale); l._off.setAttribute('dx', dx);
+        l._off.setAttribute('dx', dx);
+        l._amp.setAttribute('k1', a.toFixed(4)); l._amp.setAttribute('k3', (-a / 2).toFixed(4));
+        // map0 = mapW + b·(lean − 0.5)
+        l._lean.setAttribute('k3', b.toFixed(3)); l._lean.setAttribute('k4', (-b / 2).toFixed(3));
       }
+      GustLight.set(b);
       Sound.wind(this.w * (0.3 + 0.7 * clamp(state.vent / 0.7, 0, 1)));
     }
+  },
+};
+
+/* Свет, который врывается в комнату, когда порыв приподнимает тюль */
+const GustLight = {
+  el: null, v: -1,
+  set(b) {
+    if (!this.el) this.el = $('#gustLight');
+    const k = (state.fx && state.fx.gust || 0) * clamp(b, 0, 1.2);
+    const v = k < 0.004 ? 0 : +k.toFixed(3);
+    if (v !== this.v) { this.el.style.opacity = v; this.v = v; }
   },
 };
 
@@ -287,6 +334,7 @@ function applyScene(instant) {
   for (const k of ['day', 'sunset', 'evening']) b.toggle('time-' + k, state.mode === k);
   for (const k of ['clear', 'drizzle', 'downpour']) b.toggle('weather-' + k, state.weather === k);
   root.style.setProperty('--scene', `url("${CFG.backgrounds[state.scene].image}")`);
+  root.style.setProperty('--gust-rgb', (CFG.light.scenes[state.scene].gustColor || [255, 230, 190]).join(','));
   BG.show(state.scene, instant);
   state.fxFrom = Object.assign({}, state.fx || sceneFx()); state.fxTo = sceneFx(); state.fxT0 = instant ? 0 : nowMs();
   if (instant) state.fx = Object.assign({}, state.fxTo);
@@ -1127,7 +1175,7 @@ const Dust = {
 
 /* Погода: дождь за окном (виден сквозь тюль), вспышки молний, общее затемнение */
 const Weather = {
-  el: $('#rain'), drops: [], kind: 'clear', level: 0, target: 0, nextBolt: 0,
+  el: $('#rain'), drops: [], beads: [], runs: [], kind: 'clear', level: 0, target: 0, nextBolt: 0,
   init() { this.ctx = this.el.getContext('2d'); this.resize(); },
   resize() {
     placeEl(this.el, CFG.zones.window);
@@ -1160,11 +1208,44 @@ const Weather = {
       c.moveTo(x, y); c.lineTo(x + slant * L * 0.5, y + L);
     }
     c.stroke();
+    this.glass(c, W, H, dt);
     // молнии только в ливень
     if (this.kind === 'downpour' && t > this.nextBolt && !REDUCED) {
       this.nextBolt = t + rand(...CFG.weather.lightningEveryMs);
       this.bolt();
     }
+  },
+  /* капли на стекле: неподвижные бусины, которые иногда срываются и стекают, оставляя след */
+  glass(c, W, H, dt) {
+    const L = this.level, k = Math.min(W, H) / 300;
+    const wantB = Math.round(L * (REDUCED ? 60 : 140));
+    while (this.beads.length < wantB) this.beads.push({ x: Math.random(), y: Math.random() * 0.95, r: rand(1, 3.2) });
+    if (this.beads.length > wantB) this.beads.length = wantB;
+    if (Math.random() < dt / 1000 * (0.4 + 3.5 * L) && this.runs.length < 14) {
+      const b = this.beads[Math.floor(Math.random() * this.beads.length)];
+      if (b && b.r > 1.2) { this.runs.push({ x: b.x, y: b.y, r: b.r * 1.15, v: 0, trail: [], wob: rand(0, 6) }); b.y = Math.random() * 0.4; b.r = rand(0.6, 1.6); }
+    }
+    c.save();
+    for (const b of this.beads) {
+      const x = b.x * W, y = b.y * H, r = b.r * k;
+      c.fillStyle = 'rgba(10,14,20,0.45)'; c.beginPath(); c.arc(x, y + r * 0.3, r, 0, 6.283); c.fill();
+      c.fillStyle = 'rgba(240,246,252,0.8)'; c.beginPath(); c.arc(x - r * 0.3, y - r * 0.35, r * 0.38, 0, 6.283); c.fill();
+    }
+    c.lineCap = 'round';
+    for (let i = this.runs.length - 1; i >= 0; i--) {
+      const d = this.runs[i];
+      d.v = Math.min(0.22, d.v + dt / 1000 * 0.35 * (0.6 + Math.random()));
+      if (Math.random() < 0.02) d.v *= 0.2;                       // капля «спотыкается»
+      d.y += d.v * dt / 1000; d.x += Math.sin(d.y * 40 + d.wob) * 0.0006;
+      d.trail.push([d.x, d.y]); if (d.trail.length > 60) d.trail.shift();
+      c.strokeStyle = 'rgba(225,235,245,0.22)'; c.lineWidth = d.r * k * 0.7;
+      c.beginPath(); d.trail.forEach(([tx, ty], j) => j ? c.lineTo(tx * W, ty * H) : c.moveTo(tx * W, ty * H)); c.stroke();
+      const x = d.x * W, y = d.y * H, r = d.r * k;
+      c.fillStyle = 'rgba(10,14,20,0.4)'; c.beginPath(); c.ellipse(x, y + r * 0.2, r * 0.9, r * 1.2, 0, 0, 6.283); c.fill();
+      c.fillStyle = 'rgba(240,246,252,0.7)'; c.beginPath(); c.arc(x - r * 0.3, y - r * 0.4, r * 0.4, 0, 6.283); c.fill();
+      if (d.y > 1.03) this.runs.splice(i, 1);
+    }
+    c.restore();
   },
   bolt() {
     const f = $('#flash');
@@ -2424,8 +2505,8 @@ const Puppets = {
     const cfg = p.egg.cube;
     if (p.cube && !p.cube.dirty) return p.cube;
     if (p.cube) p.cube.wrap.remove();
-    const light = { day: 0.95, sunset: 0.82, overcast: 0.72, evening: 0.6 }[state.scene] || 0.9;
-    const warm = { day: 1, sunset: 1.4, overcast: 0.3, evening: 0.6 }[state.scene] ?? 1;
+    const light = { day: 0.95, sunset: 0.82, overcast: 0.6, storm: 0.45, evening: 0.6 }[state.scene] || 0.9;
+    const warm = { day: 1, sunset: 1.5, overcast: 0.2, storm: 0, evening: 0.6 }[state.scene] ?? 1;
     const wrap = document.createElement('div'); wrap.className = 'cube-wrap'; wrap.hidden = true;
     const [cx, cy] = this.rel(p, cfg.center[0], cfg.center[1]);
     Object.assign(wrap.style, { left: cx + '%', top: cy + '%', fontSize: `calc(var(--u) * ${cfg.size / 3})` });
@@ -2626,7 +2707,7 @@ void main(){
     gl.uniform1f(p.tt.u.theta, theta);
     const away = Math.min(theta, Math.PI * 2 - theta);
     gl.uniform1f(p.tt.u.front, smooth(0, 0.35, away));
-    gl.uniform1f(p.tt.u.L, { day: 0.7, sunset: 0.95, overcast: 0.15, evening: -0.9 }[state.scene] ?? 0.7);   // днём свет из окна справа, вечером — торшер слева
+    gl.uniform1f(p.tt.u.L, { day: 0.7, sunset: 0.95, overcast: 0.15, storm: 0.1, evening: -0.9 }[state.scene] ?? 0.7);   // днём свет из окна справа, вечером — торшер слева
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   },
 };
@@ -2935,7 +3016,7 @@ function init() {
     const dt = Math.min(64, t - last); last = t;
     if (state.fxT0) {
       const k = smooth(0, 1, clamp((t - state.fxT0) / CFG.crossfadeMs, 0, 1));
-      for (const key of Object.keys(state.fxTo)) state.fx[key] = lerp(state.fxFrom[key] || 0, state.fxTo[key], k);
+      for (const key of Object.keys(state.fxTo)) if (typeof state.fxTo[key] === 'number') state.fx[key] = lerp(state.fxFrom[key] || 0, state.fxTo[key], k);
       if (k >= 1) state.fxT0 = 0;
     }
     Wind.update(t, dt);

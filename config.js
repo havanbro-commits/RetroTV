@@ -7,7 +7,7 @@
    и вставьте результат вместо блока zones ниже.
    ============================================================ */
 window.TUBE_TV_CONFIG = {
-  version: '0.4',
+  version: '0.5',
   image: { width: 1536, height: 1024 },
 
   /* Сцены. Время суток переключает торшер (timeCycle), погоду — клик по окну
@@ -21,7 +21,8 @@ window.TUBE_TV_CONFIG = {
     day:      { image: 'assets/room-day.png',      video: null, windowVideo: null },
     sunset:   { image: 'assets/room-sunset.png',   video: null, windowVideo: null },
     evening:  { image: 'assets/room-evening.png',  video: null, windowVideo: null },
-    overcast: { image: 'assets/room-overcast.png', video: null, windowVideo: null },
+    overcast: { image: 'assets/room-overcast.png', video: null, windowVideo: null },   // морось
+    storm:    { image: 'assets/room-storm.png',    video: null, windowVideo: null },   // ливень
   },
   startMode: 'day',                            // day | sunset | evening
   startWeather: 'clear',                       // clear | drizzle | downpour
@@ -34,7 +35,8 @@ window.TUBE_TV_CONFIG = {
   hires: {
     box: [480, 250, 560, 400],
     images: { day: 'assets/hires/tv-day.webp', sunset: 'assets/hires/tv-sunset.webp',
-              evening: 'assets/hires/tv-evening.webp', overcast: 'assets/hires/tv-overcast.webp' },
+              evening: 'assets/hires/tv-evening.webp', overcast: 'assets/hires/tv-overcast.webp',
+              storm: 'assets/hires/tv-storm.webp' },
   },
 
   /* Кадрирование. focus — точка, которую стараемся держать в центре экрана,
@@ -130,10 +132,12 @@ window.TUBE_TV_CONFIG = {
   light: {
     /* по сценам: свечение экрана на стене, сила мигалки, видимость пыли */
     scenes: {
-      day:      { glow: 0.30, siren: 0.50, dust: 1.0  },
-      sunset:   { glow: 0.50, siren: 0.65, dust: 0.9  },
-      overcast: { glow: 0.45, siren: 0.75, dust: 0.25 },
-      evening:  { glow: 0.85, siren: 1.0,  dust: 0.14 },
+      /* gust — сила вспышки света при порыве, gustColor — её цвет */
+      day:      { glow: 0.30, siren: 0.50, dust: 1.0,  gust: 0.45, gustColor: [255, 236, 200] },
+      sunset:   { glow: 0.50, siren: 0.65, dust: 0.9,  gust: 0.5,  gustColor: [255, 160, 70] },
+      overcast: { glow: 0.55, siren: 0.80, dust: 0.2,  gust: 0.10, gustColor: [190, 210, 235] },
+      storm:    { glow: 0.70, siren: 0.90, dust: 0.1,  gust: 0.06, gustColor: [170, 195, 230] },
+      evening:  { glow: 0.85, siren: 1.0,  dust: 0.14, gust: 0,    gustColor: [255, 220, 170] },
     },
     spores: { far: 70, mid: 26, near: 5 },  // пыль-«споры»: дальний, средний, ближний (боке) слой
     sirenRed:  [255, 40, 40],
@@ -178,7 +182,8 @@ window.TUBE_TV_CONFIG = {
     gustMin: 0.45, gustMax: 1.0,      // сила порыва
     attackMs: [1000, 2200], holdMs: [400, 2400], decayMs: [2800, 5200],
     everyMs: [7000, 18000],           // пауза между порывами
-    scaleCalm: 4, scaleGust: 24,      // амплитуда смещения тюля (px картинки)
+    scaleCalm: 4, scaleGust: 18,      // амплитуда мелких волн в тюле (px картинки)
+    billow: 1.3,                      // насколько порыв выгибает подол внутрь комнаты (1 ≈ 40 px)
     weather: { clear: 1, drizzle: 1.25, downpour: 1.7 },
   },
   weather: { lightningEveryMs: [14000, 38000] },

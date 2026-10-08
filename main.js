@@ -72,6 +72,7 @@ function layout() {
   root.style.setProperty('--u', s + 'px');
   Camera.apply(false);
   Weather.resize && Weather.ctx && Weather.resize();
+  GLRoom.resize();
   Dust.resize();
   Calib.refresh();
 }
@@ -126,6 +127,207 @@ const sceneFx = () => {
   return f;
 };
 
+/* ==========================================================================
+   2a. КОМНАТА НА WebGL
+   Одна сцена вместо стопки картинок. Дневная фотография раскладывается на
+   «комнату» и карту солнечных пятен (assets/sunmap.webp). На закате карта
+   поворачивается и вытягивается вокруг окна — лучи ложатся ниже и длиннее,
+   свет краснеет, комната темнеет. Всё это плавно, на глазах.
+   Тюль — тот же шейдер: бегущие складки с подсветкой и мягкий «парус» порыва.
+   Если WebGL недоступен, работает старая схема из картинок (BG).
+   ========================================================================== */
+const GLRoom = {
+  ok: false, dirty: true,
+  cur: { w: [1, 0, 0, 0], s: 0, k: 1 }, tw: {},
+  wind: { amp: 3, billow: 0, phase: 0 },
+  SCENES: ['day', 'evening', 'overcast', 'storm'],
+
+  init() {
+    const c = document.createElement('canvas');
+    c.className = 'room-gl'; c.setAttribute('aria-hidden', 'true');
+    const gl = c.getContext('webgl', { alpha: false, antialias: false, premultipliedAlpha: false, preserveDrawingBuffer: true, powerPreference: 'high-performance' });
+    if (!gl) return Promise.reject(new Error('no webgl'));
+    this.c = c; this.gl = gl;
+    const VS = 'attribute vec2 a; varying vec2 v; void main(){ v = vec2(a.x * 0.5 + 0.5, 0.5 - a.y * 0.5); gl_Position = vec4(a, 0.0, 1.0); }';
+    const FS = `
+precision highp float;
+varying vec2 v;
+uniform sampler2D uDay, uEve, uOver, uStorm, uSun;
+uniform vec4 uW;            // веса сцен: день(с солнцем), вечер, морось, ливень
+uniform vec2 uImg;          // размер исходной картинки, px
+uniform vec4 uWin;          // окно: x0, y0, x1, y1 (px)
+uniform mat3 uMinv;         // обратное преобразование карты солнца
+uniform vec3 uAmb, uSunC, uWinC;
+uniform float uSunK, uAmp, uBillow, uPhase, uTime, uRain, uSlant;
+float h11(float n){ return fract(sin(n * 127.1) * 43758.5453); }
+/* струи дождя за стеклом: три слоя глубины, каждая струя — тонкая вертикальная черта со «шлейфом» */
+float rainLayer(vec2 p, float cw, float len, float speed, float seed){
+  p.x += p.y * uSlant;
+  float cell = floor(p.x / cw);
+  float r = h11(cell + seed), r2 = h11(cell * 1.7 + seed + 3.1);
+  float cx = (cell + 0.2 + 0.6 * r) * cw;
+  float across = exp(-pow((p.x - cx) / 1.15, 2.0));
+  float y = fract(p.y / len - uTime * speed * (0.8 + 0.4 * r2) + r * 7.0);
+  float along = smoothstep(0.0, 0.08, y) * (1.0 - smoothstep(0.08, 0.6, y));
+  return across * along * step(0.35, r2);
+}
+
+vec3 lin(vec3 c){ return pow(max(c, 0.0), vec3(2.2)); }
+vec3 gam(vec3 c){ return pow(max(c, 0.0), vec3(1.0 / 2.2)); }
+float sunAt(vec2 px){
+  vec2 uv = px / uImg;
+  if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) return 0.0;
+  float s = texture2D(uSun, uv).r; return 12.0 * s * s;
+}
+void main(){
+  vec2 p = v * uImg;
+  // ---- тюль ----
+  float ext = 120.0;
+  float W = uWin.z - uWin.x, H = uWin.w - uWin.y;
+  float xn = (p.x - uWin.x) / W, yn = (p.y - uWin.y) / H;
+  float inside = step(0.0, xn) * step(yn, 1.0) * step(0.0, yn);
+  float envW = inside * smoothstep(0.0, 0.14, xn) * (1.0 - smoothstep(0.95, 1.0, xn)) * smoothstep(0.03, 0.75, yn) * (1.0 - smoothstep(0.93, 0.995, yn));
+  float k = 6.2831853 / 120.0;
+  float ph = uPhase * k;
+  float a1 = k * p.x - ph + p.y * 0.010, a2 = 2.0 * k * p.x - 1.3 * ph + p.y * 0.006 + 1.3, a3 = 3.0 * k * p.x + 0.7 * ph + p.y * 0.017 + 0.4;
+  float wave = 0.55 * sin(a1) + 0.30 * sin(a2) + 0.15 * sin(a3);
+  float slope = (0.55 * cos(a1) + 0.60 * cos(a2) + 0.45 * cos(a3)) * k;
+  float dx = uAmp * envW * wave;
+  float shade = 1.0 + clamp(slope * uAmp * envW * 2.2, -0.18, 0.18);
+  // «парус»: подол уходит внутрь комнаты, верх у карниза неподвижен, у стены — тоже
+  float xe = (p.x - (uWin.x - ext)) / (W + ext), e0 = ext / (W + ext);
+  float prof = pow(smoothstep(0.28, 1.0, yn), 2.0) * (1.0 - smoothstep(0.80, 1.0, xe)) * smoothstep(0.0, e0 + 0.14, xe) * step(0.0, xe) * step(yn, 1.0);
+  prof *= 0.8 + 0.2 * sin(xe * 9.0 + yn * 3.0 + uTime * 0.6);
+  vec2 q = p + vec2(dx + uBillow * prof, -uBillow * 0.22 * prof);
+  shade += uBillow * prof * 0.004 * inside;
+  vec2 uq = q / uImg;
+  // ---- свет ----
+  float winM = smoothstep(uWin.x - 6.0, uWin.x + 10.0, p.x) * (1.0 - smoothstep(uWin.w - 10.0, uWin.w + 6.0, p.y));
+  vec3 col = vec3(0.0);
+  if (uW.x > 0.001) {
+    float Lold = sunAt(q);
+    vec3 m = uMinv * vec3(q, 1.0);
+    float Lnew = sunAt(m.xy) * uSunK;
+    vec3 ratio = mix((uAmb + Lnew * uSunC) / (1.0 + Lold), uWinC, winM);
+    col += uW.x * gam(lin(texture2D(uDay, uq).rgb) * ratio);
+  }
+  if (uW.y > 0.001) col += uW.y * texture2D(uEve, uq).rgb;
+  if (uW.z > 0.001) col += uW.z * texture2D(uOver, uq).rgb;
+  if (uW.w > 0.001) col += uW.w * texture2D(uStorm, uq).rgb;
+  col *= shade;
+  // ---- дождь: виден сквозь тюль там, где через него идёт свет из окна ----
+  if (uRain > 0.001) {
+    float lumc = dot(col, vec3(0.299, 0.587, 0.114));
+    float r = rainLayer(p, 9.0, 260.0, 1.9, 1.0) * 0.55 + rainLayer(p + 37.0, 6.0, 170.0, 2.6, 7.0) * 0.35 + rainLayer(p + 71.0, 14.0, 380.0, 1.4, 13.0) * 0.6;
+    float cloud = 0.5 + 0.5 * sin(uTime * 0.23) * sin(uTime * 0.071 + 1.3);
+    col *= 1.0 - winM * uRain * (0.10 + 0.10 * cloud);                 // облака гуляют — свет из окна дышит
+    col += winM * uRain * r * (0.25 + 0.75 * smoothstep(0.04, 0.5, lumc)) * vec3(0.30, 0.33, 0.37);
+  }
+  gl_FragColor = vec4(col, 1.0);
+}`;
+    const sh = (t, s) => { const o = gl.createShader(t); gl.shaderSource(o, s); gl.compileShader(o); if (!gl.getShaderParameter(o, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(o)); return o; };
+    const prog = gl.createProgram();
+    gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS)); gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FS));
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+    gl.useProgram(prog);
+    const b = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, b);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+    const loc = gl.getAttribLocation(prog, 'a'); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+    this.u = {};
+    for (const n of ['uDay', 'uEve', 'uOver', 'uStorm', 'uSun', 'uW', 'uImg', 'uWin', 'uMinv', 'uAmb', 'uSunC', 'uWinC', 'uSunK', 'uAmp', 'uBillow', 'uPhase', 'uTime', 'uRain', 'uSlant']) this.u[n] = gl.getUniformLocation(prog, n);
+    gl.uniform2f(this.u.uImg, IMG_W, IMG_H);
+    const srcs = { uDay: CFG.backgrounds.day.image, uEve: CFG.backgrounds.evening.image, uOver: CFG.backgrounds.overcast.image,
+      uStorm: (CFG.backgrounds.storm || CFG.backgrounds.overcast).image, uSun: CFG.sun.map };
+    const load = (src) => new Promise((res, rej) => { const im = new Image(); im.decoding = 'async'; im.onload = () => res(im); im.onerror = () => rej(new Error('img ' + src)); im.src = src; });
+    return Promise.all(Object.entries(srcs).map(([k, src], i) => load(src).then(im => {
+      gl.activeTexture(gl.TEXTURE0 + i);
+      const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, im);
+      for (const [p, val] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, p, val);
+      gl.uniform1i(this.u[k], i);
+    }))).then(() => { this.ok = true; this.resize(); this.dirty = true; return true; });
+  },
+
+  resize() {
+    if (!this.c) return;
+    const st = state.stage, dpr = Math.min(devicePixelRatio || 1, 2);
+    const w = Math.max(2, Math.round(Math.min(st.w * dpr, IMG_W * 1.25))), h = Math.round(w * IMG_H / IMG_W);
+    if (this.c.width !== w || this.c.height !== h) { this.c.width = w; this.c.height = h; this.dirty = true; }
+  },
+
+  /* параметры солнца по «высоте» s: 0 — день, 1 — закат */
+  sunParams(s) {
+    const P = CFG.sun.pose, e = s * s * (3 - 2 * s);
+    const ang = P.ang * e * Math.PI / 180, sc = 1 + (P.sc - 1) * e, tx = P.tx * e, ty = P.ty * e;
+    const al = sc * Math.cos(ang), be = sc * Math.sin(ang), px = P.px, py = P.py;
+    const M = [[al, be, (1 - al) * px - be * py + tx], [-be, al, be * px + (1 - al) * py + ty]];
+    const det = al * al + be * be, ia = al / det, ib = -be / det, ic = be / det, id = al / det;   // [[ia, ib],[ic, id]] = A⁻¹
+    const itx = -(ia * M[0][2] + ib * M[1][2]), ity = -(ic * M[0][2] + id * M[1][2]);
+    const bz = (c0, c1, c2) => c0.map((_, i) => (1 - s) * (1 - s) * c0[i] + 2 * s * (1 - s) * c1[i] + s * s * c2[i]);
+    const C = CFG.sun;
+    return { minv: [ia, ic, 0, ib, id, 0, itx, ity, 1],            // mat3 по столбцам
+      amb: bz([1, 1, 1], C.mid.amb, C.amb), sun: bz([1, 1, 1], C.mid.sun, C.sun), win: bz([1, 1, 1], C.mid.win, C.win) };
+  },
+
+  target(scene) {
+    const c = this.cur;
+    return {
+      day: { w: [1, 0, 0, 0], s: 0, k: 1 }, sunset: { w: [1, 0, 0, 0], s: 1, k: 1 },
+      evening: { w: [0, 1, 0, 0], s: c.s, k: 0.25 },
+      overcast: { w: [0, 0, 1, 0], s: c.s, k: c.k }, storm: { w: [0, 0, 0, 1], s: c.s, k: c.k },
+    }[scene];
+  },
+  go(scene, instant) {
+    const T = this.target(scene); if (!T) return;
+    const now = nowMs(), c = this.cur;
+    if (instant) { this.cur = { w: T.w.slice(), s: T.s, k: T.k }; this.tw = {}; this.dirty = true; return; }
+    const sunMs = Math.abs(T.s - c.s) * (T.s > c.s ? CFG.sun.setMs : CFG.sun.riseMs);
+    this.tw = {
+      w: { from: c.w.slice(), to: T.w, t0: now, d: CFG.crossfadeMs },
+      s: { from: c.s, to: T.s, t0: now, d: Math.max(1, sunMs) },
+      k: { from: c.k, to: T.k, t0: now, d: CFG.crossfadeMs },
+    };
+  },
+  busy() { return Object.keys(this.tw).length > 0; },
+  step(t) {
+    const ease = x => x < 0.5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2;
+    for (const [key, tw] of Object.entries(this.tw)) {
+      const x = clamp((t - tw.t0) / tw.d, 0, 1), e = ease(x);
+      this.cur[key] = Array.isArray(tw.from) ? tw.from.map((f, i) => lerp(f, tw.to[i], e)) : lerp(tw.from, tw.to, e);
+      if (x >= 1) delete this.tw[key];
+    }
+  },
+
+  render(t) {
+    if (!this.ok) return;
+    const gl = this.gl, u = this.u, c = this.cur, full = this.dirty || this.busy();
+    this.step(t);
+    const sp = this.sunParams(clamp(c.s, 0, 1));
+    gl.uniform4f(u.uW, c.w[0], c.w[1], c.w[2], c.w[3]);
+    gl.uniformMatrix3fv(u.uMinv, false, sp.minv);
+    gl.uniform3fv(u.uAmb, sp.amb); gl.uniform3fv(u.uSunC, sp.sun); gl.uniform3fv(u.uWinC, sp.win);
+    gl.uniform1f(u.uSunK, c.k);
+    const z = zpx(CFG.zones.window);
+    gl.uniform4f(u.uWin, z.x, z.y, z.x + z.w, z.y + z.h);
+    gl.uniform1f(u.uAmp, REDUCED ? 0 : this.wind.amp);
+    gl.uniform1f(u.uBillow, REDUCED ? 0 : this.wind.billow);
+    gl.uniform1f(u.uPhase, this.wind.phase);
+    gl.uniform1f(u.uTime, t / 1000);
+    gl.uniform1f(u.uRain, Weather.level || 0);
+    gl.uniform1f(u.uSlant, 0.12 + Wind.w * 0.25);
+    const W = this.c.width, H = this.c.height, kx = W / IMG_W;
+    gl.viewport(0, 0, W, H);
+    if (full) { gl.disable(gl.SCISSOR_TEST); this.dirty = false; }
+    else {                                              // в покое перерисовываем только окно с тюлем
+      const x0 = Math.max(0, Math.floor((z.x - 140) * kx)), y1 = Math.ceil((z.y + z.h + 4) * kx);
+      gl.enable(gl.SCISSOR_TEST); gl.scissor(x0, H - Math.min(H, y1), W - x0, Math.min(H, y1));
+    }
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  },
+};
+
 const BG = {
   layers: {}, bds: {}, z: 1, current: null,
   DISP: 90,                                   // общий масштаб смещения; волны и «парус» дозируются коэффициентами
@@ -138,12 +340,13 @@ const BG = {
       img.src = def.image; img.alt = ''; img.decoding = 'async'; img.draggable = false;
       layer.appendChild(img);
       if (CFG.hires && CFG.hires.images[scene]) {
+        if (!this.hiresWrap) { this.hiresWrap = document.createElement('div'); this.hiresWrap.className = 'hires-wrap'; }
         const hr = new Image(); hr.className = 'hires'; hr.alt = ''; hr.decoding = 'async';
-        hr.dataset.src = CFG.hires.images[scene];
+        hr.dataset.src = CFG.hires.images[scene]; hr.dataset.scene = scene;
         const [x, y, w, h] = CFG.hires.box;
         Object.assign(hr.style, { left: x / IMG_W * 100 + '%', top: y / IMG_H * 100 + '%', width: w / IMG_W * 100 + '%', height: h / IMG_H * 100 + '%' });
         hr.addEventListener('load', () => hr.classList.add('loaded'));
-        layer.appendChild(hr);
+        this.hiresWrap.appendChild(hr);
       }
       if (def.video) {
         const v = this.video(def.video, def.image);
@@ -160,6 +363,16 @@ const BG = {
       const b = document.createElement('div'); b.className = 'bd'; b.style.backgroundImage = `url("${def.image}")`; b.style.opacity = 0;
       bd.appendChild(b); this.bds[scene] = b;
     }
+    if (this.hiresWrap) bg.appendChild(this.hiresWrap);
+  },
+  /* WebGL-комната готова: прячем картинки, выключаем SVG-фильтры */
+  enableGL() {
+    this.gl = true;
+    const bg = $('#bg');
+    bg.insertBefore(GLRoom.c, this.hiresWrap || null);
+    for (const l of Object.values(this.layers)) { const s = l.querySelector('svg.sway'); if (s) s.remove(); }
+    GLRoom.go(state.scene, true);
+    requestAnimationFrame(() => { GLRoom.c.classList.add('on'); setTimeout(() => bg.classList.add('gl'), 700); });
   },
   video(src, poster) {
     const v = document.createElement('video');
@@ -173,6 +386,8 @@ const BG = {
   show(scene, instant) {
     if (this.current === scene || !this.layers[scene]) return;
     this.current = scene;
+    if (this.hiresWrap) for (const h of this.hiresWrap.children) h.classList.toggle('on', h.dataset.scene === scene);
+    if (this.gl) GLRoom.go(scene, instant);
     const z = ++this.z;
     for (const [el, others] of [[this.layers[scene], this.layers], [this.bds[scene], this.bds]]) {
       el.classList.remove('is-hidden'); el.style.zIndex = z;
@@ -187,7 +402,7 @@ const BG = {
     if (instant) hideOthers(); else this._t = setTimeout(hideOthers, CFG.crossfadeMs + 60);
   },
   loadHires() {
-    for (const l of Object.values(this.layers)) { const h = l.querySelector('.hires'); if (h && !h.src) h.src = h.dataset.src; }
+    if (this.hiresWrap) for (const h of this.hiresWrap.children) if (!h.src) h.src = h.dataset.src;
   },
 
   /* Карта смещения. R — волны по горизонтали, G — подъём подола на порывах.
@@ -270,7 +485,7 @@ const BG = {
     layer._off = layer.querySelector('feOffset'); layer._disp = layer.querySelector('feDisplacementMap');
     const comps = layer.querySelectorAll('feComposite'); layer._amp = comps[0]; layer._lean = comps[1];
   },
-  rebuildSway() { for (const [s, l] of Object.entries(this.layers)) if (!l.querySelector('video')) this.addSway(l, s); },
+  rebuildSway() { if (this.gl) return; for (const [s, l] of Object.entries(this.layers)) if (!l.querySelector('video')) this.addSway(l, s); },
 };
 
 /* Ветер: тихое дыхание + порывы (нарастают за 1–2 с, держатся, стихают за 3–5 с).
@@ -310,6 +525,9 @@ const Wind = {
         l._lean.setAttribute('k3', b.toFixed(3)); l._lean.setAttribute('k4', (-b / 2).toFixed(3));
       }
       GustLight.set(b);
+      GLRoom.wind.amp = a * BG.DISP * 0.5;                 // px
+      GLRoom.wind.billow = b * (W.billowPx || 22);          // px
+      GLRoom.wind.phase = this.phase;
       Sound.wind(this.w * (0.3 + 0.7 * clamp(state.vent / 0.7, 0, 1)));
     }
   },
@@ -1195,6 +1413,7 @@ const Weather = {
     const c = this.ctx, W = this.el.width, H = this.el.height;
     c.clearRect(0, 0, W, H);
     if (this.level < 0.01) return;
+    if (BG.gl) { this.glass(c, W, H, dt); if (this.kind === 'downpour' && t > this.nextBolt && !REDUCED) { this.nextBolt = t + rand(...CFG.weather.lightningEveryMs); this.bolt(); } return; }
     const want = Math.round(this.level * (REDUCED ? 70 : 170));
     while (this.drops.length < want) this.drops.push({ x: Math.random(), y: Math.random(), v: rand(0.9, 1.6), l: rand(0.03, 0.07) });
     if (this.drops.length > want) this.drops.length = want;
@@ -1219,10 +1438,10 @@ const Weather = {
   /* капли на стекле: неподвижные бусины, которые иногда срываются и стекают, оставляя след */
   glass(c, W, H, dt) {
     const L = this.level, k = Math.min(W, H) / 300;
-    const wantB = Math.round(L * (REDUCED ? 60 : 140));
-    while (this.beads.length < wantB) this.beads.push({ x: Math.random(), y: Math.random() * 0.95, r: rand(1, 3.2) });
+    const wantB = Math.round(L * (REDUCED ? 40 : 90));
+    while (this.beads.length < wantB) this.beads.push({ x: Math.random(), y: Math.random() * 0.95, r: rand(1.8, 4.2) });
     if (this.beads.length > wantB) this.beads.length = wantB;
-    if (Math.random() < dt / 1000 * (0.4 + 3.5 * L) && this.runs.length < 14) {
+    if (Math.random() < dt / 1000 * (0.3 + 1.8 * L) && this.runs.length < 8) {
       const b = this.beads[Math.floor(Math.random() * this.beads.length)];
       if (b && b.r > 1.2) { this.runs.push({ x: b.x, y: b.y, r: b.r * 1.15, v: 0, trail: [], wob: rand(0, 6) }); b.y = Math.random() * 0.4; b.r = rand(0.6, 1.6); }
     }
@@ -1408,7 +1627,7 @@ const Sound = {
     for (let i = 0; i < d.length; i += 2048 * step) { let s = 0, n = 0; for (let j = i; j < Math.min(i + 2048, d.length); j += step) { s += d[j] * d[j]; n++; } if (n) vals.push(Math.sqrt(s / n)); }
     vals.sort((a, b2) => a - b2);
     const loud = vals[Math.floor(vals.length * 0.8)] || 0.05;
-    return clamp(0.1 / loud, 0.2, 12);
+    return clamp(0.1 / loud, 0.2, 4);
   },
   fileBuf(name) { const f = this.files[name]; return Array.isArray(f) ? pick(f) : f; },
   playFile(name, t, dest, { vol = 1, loop = false, pan, maxDur, fadeOut = 2.5, offset = 0 } = {}) {
@@ -1572,7 +1791,7 @@ const Sound = {
       fm.connect(fg).connect(o.frequency);
       const bp = this.f('bandpass', 6800, 3), gn = this.g(0), pn = this.p(-dir);
       o.connect(bp).connect(gn).connect(pn).connect(bus);
-      if (pn.pan) { pn.pan.setValueAtTime(-dir * 0.8 + 0.3, tt); pn.pan.linearRampToValueAtTime(dir * 0.8 + 0.3, tt + dur); }
+      if (pn.pan) { pn.pan.setValueAtTime(clamp(-dir * 0.8 + 0.2, -1, 1), tt); pn.pan.linearRampToValueAtTime(clamp(dir * 0.8 + 0.2, -1, 1), tt + dur); }
       o.frequency.setValueAtTime(rand(5800, 6600), tt); o.frequency.linearRampToValueAtTime(rand(7000, 7800), tt + dur * 0.4); o.frequency.linearRampToValueAtTime(rand(6000, 6600), tt + dur);
       gn.gain.setValueAtTime(0, tt); gn.gain.linearRampToValueAtTime(rand(0.006, 0.014), tt + 0.05); gn.gain.linearRampToValueAtTime(0, tt + dur);
       o.start(tt); fm.start(tt); o.stop(tt + dur + 0.05); fm.stop(tt + dur + 0.05);
@@ -2965,6 +3184,9 @@ function init() {
   root.style.setProperty('--seat-ms', CFG.seat.durationMs + 'ms');
   state.scene = sceneOf(state.mode, state.weather);
   BG.init();
+  try {
+    GLRoom.init().then(() => BG.enableGL()).catch(err => console.warn('[Tube TV] WebGL-комната недоступна, работают картинки:', err.message));
+  } catch (err) { console.warn('[Tube TV] WebGL-комната:', err.message); }
   TV.init();
   Embed.init();
   Light.init();
@@ -3028,6 +3250,11 @@ function init() {
       if (k >= 1) state.fxT0 = 0;
     }
     Wind.update(t, dt);
+    if (BG.gl) {
+      GLRoom.render(t);
+      const busy = GLRoom.busy();
+      if (busy !== BG._busy && BG.hiresWrap) { BG._busy = busy; BG.hiresWrap.classList.toggle('busy', busy); }
+    }
     TV.render(t);
     Light.update(t);
     Dust.update(t, dt);
@@ -3036,7 +3263,7 @@ function init() {
   };
   requestAnimationFrame(frame);
 
-  window.TubeTV = { TV, Sound, Events, setMode, setWeather, Calib, Puppets, Camera, Embed, Wind, Weather, state, CFG };   // для отладки из консоли
+  window.TubeTV = { GLRoom, BG, TV, Sound, Events, setMode, setWeather, Calib, Puppets, Camera, Embed, Wind, Weather, state, CFG };   // для отладки из консоли
 }
 
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();

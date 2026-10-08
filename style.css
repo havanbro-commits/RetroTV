@@ -4,7 +4,7 @@
   --xfade: 2600ms;
   --u: 1px;                         /* 1 пиксель исходной картинки в CSS-пикселях (ставит main.js) */
   --screen-radius: 10% / 13%;
-  --scene: url("assets/room-day.png");
+  --scene: url("assets/room-day.webp");
   --grain-opacity: .07;
   --vig: .55;
   --warm: 255, 196, 120;
@@ -58,19 +58,25 @@ html, body {
 .bg-layer.is-hidden { visibility: hidden; }
 .sway { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
 /* чёткая версия телевизора для режима «сесть» */
-.bg-layer img.hires {
+.room-gl { position: absolute; inset: 0; width: 100%; height: 100%; display: block; opacity: 0; transition: opacity .6s ease; }
+.room-gl.on { opacity: 1; }
+#bg.gl .bg-layer { visibility: hidden; }
+.hires-wrap { position: absolute; inset: 0; pointer-events: none; }
+.hires-wrap img.hires {
+  position: absolute; display: block;
   inset: auto; opacity: 0; transition: opacity .8s ease;
   -webkit-mask-image: linear-gradient(90deg, transparent, #000 7%, #000 93%, transparent), linear-gradient(transparent, #000 7%, #000 93%, transparent);
   -webkit-mask-composite: source-in;
   mask-image: linear-gradient(90deg, transparent, #000 7%, #000 93%, transparent), linear-gradient(transparent, #000 7%, #000 93%, transparent);
   mask-composite: intersect;
 }
-body.seated .bg-layer img.hires.loaded { opacity: 1; }
+body.seated .hires-wrap img.hires.loaded.on { opacity: 1; }
+.hires-wrap.busy img.hires { opacity: 0 !important; }
 .bg-layer video.window-video {
   inset: auto;
   -webkit-mask-image: linear-gradient(90deg, transparent, #000 10%); mask-image: linear-gradient(90deg, transparent, #000 10%);
 }
-.rain { position: absolute; pointer-events: none; opacity: .7; }
+.rain { position: absolute; pointer-events: none; opacity: .55; mix-blend-mode: overlay; }
 
 /* ---------- экран ---------- */
 .tv-screen {

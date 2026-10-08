@@ -7,7 +7,7 @@
    и вставьте результат вместо блока zones ниже.
    ============================================================ */
 window.TUBE_TV_CONFIG = {
-  version: '0.5.1',
+  version: '0.6',
   image: { width: 1536, height: 1024 },
 
   /* Сцены. Время суток переключает торшер (timeCycle), погоду — клик по окну
@@ -18,17 +18,29 @@ window.TUBE_TV_CONFIG = {
      sunset и overcast собраны цветокоррекцией из ваших картинок; если сгенерируете
      свои — просто замените файлы (композиция должна совпадать). */
   backgrounds: {
-    day:      { image: 'assets/room-day.png',      video: null, windowVideo: null },
-    sunset:   { image: 'assets/room-sunset.png',   video: null, windowVideo: null },
-    evening:  { image: 'assets/room-evening.png',  video: null, windowVideo: null },
-    overcast: { image: 'assets/room-overcast.png', video: null, windowVideo: null },   // морось
-    storm:    { image: 'assets/room-storm.png',    video: null, windowVideo: null },   // ливень
+    day:      { image: 'assets/room-day.webp',      video: null, windowVideo: null },
+    sunset:   { image: 'assets/room-sunset.webp',   video: null, windowVideo: null },
+    evening:  { image: 'assets/room-evening.webp',  video: null, windowVideo: null },
+    overcast: { image: 'assets/room-overcast.webp', video: null, windowVideo: null },   // морось
+    storm:    { image: 'assets/room-storm.webp',    video: null, windowVideo: null },   // ливень
   },
   startMode: 'day',                            // day | sunset | evening
   startWeather: 'clear',                       // clear | drizzle | downpour
   timeCycle: ['day', 'sunset', 'evening'],     // клик по торшеру
   weatherCycle: ['clear', 'drizzle', 'downpour'],   // клик по окну
   crossfadeMs: 2600,
+
+  /* Солнце: карта пятен и лучей, вырезанная из дневной картинки, и куда она
+     уезжает на закате (поворот ang° и растяжение sc вокруг окна px/py, сдвиг tx/ty).
+     amb/sun/win — множители цвета комнаты в тени, солнечных пятен и окна на закате;
+     mid — «золотой час» посередине. setMs — сколько садится солнце (торшер: день → закат). */
+  sun: {
+    map: 'assets/sunmap.webp',
+    pose: { ang: 8, sc: 1.33, tx: -140, ty: -115, px: 1340, py: 330 },
+    amb: [0.50, 0.40, 0.42], sun: [1.35, 0.62, 0.25], win: [1.05, 0.62, 0.35],
+    mid: { amb: [0.82, 0.72, 0.66], sun: [1.2, 0.88, 0.58], win: [1.05, 0.84, 0.62] },
+    setMs: 7000, riseMs: 4000,
+  },
 
   /* Чёткая (увеличенная нейросетью ×4) версия телевизора и ниши — подгружается,
      когда вы «садитесь перед телевизором». box — где она лежит на картинке, в пикселях. */
@@ -184,6 +196,7 @@ window.TUBE_TV_CONFIG = {
     attackMs: [1000, 2200], holdMs: [400, 2400], decayMs: [2800, 5200],
     everyMs: [7000, 18000],           // пауза между порывами
     scaleCalm: 4, scaleGust: 18,      // амплитуда мелких волн в тюле (px картинки)
+    billowPx: 16,                     // на сколько пикселей порыв уводит подол в комнату (WebGL)
     billow: 1.3,                      // насколько порыв выгибает подол внутрь комнаты (1 ≈ 40 px)
     weather: { clear: 1, drizzle: 1.25, downpour: 1.7 },
   },

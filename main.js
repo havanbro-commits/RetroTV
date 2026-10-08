@@ -528,10 +528,13 @@ const TV = {
         else Channels.noVideo(g, W, H, sec, ch, this.ch + 1);
         break;
       }
-      case 'youtube':
-        if (Embed.failed) Channels.noVideo(g, W, H, sec, ch, this.ch + 1, Embed.msg);
-        else { g.fillStyle = '#000'; g.fillRect(0, 0, W, H); }
+      case 'youtube': {
+        if (Embed.failed) { Channels.noVideo(g, W, H, sec, ch, this.ch + 1, Embed.msg); break; }
+        g.fillStyle = '#000'; g.fillRect(0, 0, W, H);
+        const txt = Embed.screenText();
+        if (txt && Embed.status !== 'tap') Channels.tuning(g, W, H, sec, ch, txt);
         break;
+      }
       default: g.fillStyle = '#777'; g.fillRect(0, 0, W, H);
     }
     Channels.osd(g, W, H, t, this);
@@ -722,6 +725,18 @@ const Channels = {
     g.restore();
   },
 
+  /* «поиск сигнала»: снег и надпись, пока плеер грузится */
+  tuning(g, W, H, sec, ch, txt) {
+    const id = g.createImageData(W / 4 | 0, H / 4 | 0), d = id.data;
+    for (let i = 0; i < d.length; i += 4) { const v = Math.random() * 120; d[i] = d[i + 1] = d[i + 2] = v; d[i + 3] = 255; }
+    if (!this._snow || this._snow.width !== id.width) { this._snow = document.createElement('canvas'); this._snow.width = id.width; this._snow.height = id.height; }
+    this._snow.getContext('2d').putImageData(id, 0, 0);
+    g.imageSmoothingEnabled = false; g.drawImage(this._snow, 0, 0, W, H); g.imageSmoothingEnabled = true;
+    g.fillStyle = 'rgba(0,0,0,.55)'; g.fillRect(0, H / 2 - 30, W, 60);
+    g.textAlign = 'center'; g.textBaseline = 'middle'; g.font = `14px ${PIX}`; g.fillStyle = '#e8f0ff';
+    if (Math.floor(sec * 1.5) % 2 === 0 || REDUCED) g.fillText(txt, W / 2, H / 2 - 6);
+    g.font = `8px ${PIX}`; g.fillStyle = '#9fb0d0'; g.fillText(ch.label || '', W / 2, H / 2 + 16);
+  },
   noVideo(g, W, H, sec, ch, num, msg) {
     g.fillStyle = '#1736c4'; g.fillRect(0, 0, W, H);
     g.fillStyle = '#4fff7a'; g.textAlign = 'left'; g.textBaseline = 'top'; g.font = `18px ${PIX}`;
@@ -762,6 +777,9 @@ const Channels = {
    ========================================================================== */
 const Embed = {
   el: $('#tvEmbed'), player: null, ready: false, ch: null, loading: null, failed: false, msg: '',
+  status: 'idle', ytState: -2, errors: 0, hostIdx: 0, t0: 0,
+  hosts: ['https://www.youtube-nocookie.com', 'https://www.youtube.com'],
+  log(...a) { console.info('[Tube TV] YouTube:', ...a); },
   init() {
     this.resize();
     const z = zpx(CFG.zones.screen), g = this.el.querySelector('.crt-glass');
@@ -778,6 +796,12 @@ const Embed = {
     if (s.videos && s.videos.length) return { videos: s.videos };
     return null;
   },
+  /* что показать на экране, пока видео не идёт */
+  screenText() {
+    if (this.failed) return null;
+    return { loading: 'ПОИСК СИГНАЛА…', starting: 'НАСТРОЙКА…', tap: 'НАЖМИТЕ НА ЭКРАН', skip: 'РОЛИК НЕДОСТУПЕН — ДАЛЬШЕ' }[this.status] || null;
+  },
+  playing() { return this.status === 'playing'; },
   api() {
     if (this.loading) return this.loading;
     this.loading = new Promise((res, rej) => {
@@ -787,49 +811,108 @@ const Embed = {
       const s = document.createElement('script');
       s.src = 'https://www.youtube.com/iframe_api'; s.async = true; s.onerror = () => rej(new Error('blocked'));
       document.head.appendChild(s);
-      setTimeout(() => rej(new Error('timeout')), 9000);
+      setTimeout(() => rej(new Error('timeout')), 12000);
     });
-    this.loading.catch(() => { this.loading = null; });
+    this.loading.catch(e => { this.log('API не загрузился:', e.message); this.loading = null; });
     return this.loading;
   },
+  setStatus(s) {
+    if (this.status === s) return;
+    this.status = s; this.log('статус', s);
+    this.el.classList.toggle('clickable', s === 'tap');
+  },
   async play(ch) {
-    this.ch = ch; this.failed = false; this.msg = '';
+    this.ch = ch; this.failed = false; this.msg = ''; this.errors = 0;
     const s = this.source(ch);
     if (!s) { this.failed = true; this.msg = 'впишите канал в config.js'; return; }
+    this.setStatus('loading');
     try { await this.api(); }
-    catch (_) { this.failed = true; this.msg = location.protocol === 'file:' ? 'нужен локальный сервер' : 'YouTube недоступен'; return; }
+    catch (_) { this.failed = true; this.msg = location.protocol === 'file:' ? 'нужен локальный сервер' : 'YouTube недоступен'; this.setStatus('idle'); return; }
     if (this.ch !== ch || !TV.on) return;
     this.el.classList.add('on');
-    if (!this.player) {
-      const host = document.createElement('div'); host.id = 'ytHost';
-      this.el.prepend(host);
-      this.player = new YT.Player('ytHost', {
-        width: '640', height: '360', host: 'https://www.youtube-nocookie.com',
-        videoId: s.videos ? pick(s.videos) : undefined,
-        playerVars: Object.assign({ autoplay: 1, controls: 0, disablekb: 1, fs: 0, iv_load_policy: 3, playsinline: 1, rel: 0, cc_load_policy: 0 },
-          s.list ? { listType: 'playlist', list: s.list } : {}, location.protocol.startsWith('http') ? { origin: location.origin } : {}),
-        events: {
-          onReady: () => { this.ready = true; this.syncVolume(); this.shuffle(); },
-          onStateChange: e => { if (e.data === 0) this.next(); },          // 0 — ролик закончился
-          onError: () => setTimeout(() => this.next(), 300),             // встраивание запрещено / ролик удалён
-        },
-      });
-    } else if (this.ready) {
+    this.setStatus('starting');
+    this.t0 = nowMs();
+    if (!this.player) this.create(s);
+    else if (this.ready) this.load(s);
+    this.watch();
+  },
+  create(s) {
+    const host = document.createElement('div'); host.id = 'ytHost';
+    const old = this.el.querySelector('iframe, #ytHost'); if (old) old.remove();
+    this.el.prepend(host);
+    this.ready = false;
+    const hostUrl = this.hosts[this.hostIdx % this.hosts.length];
+    this.log('создаю плеер', hostUrl, s);
+    this.player = new YT.Player('ytHost', {
+      width: '640', height: '360', host: hostUrl,
+      videoId: s.videos ? pick(s.videos) : undefined,
+      playerVars: Object.assign({ autoplay: 1, mute: 1, controls: 0, disablekb: 1, fs: 0, iv_load_policy: 3, playsinline: 1, rel: 0, cc_load_policy: 0 },
+        s.list ? { listType: 'playlist', list: s.list } : {}, location.protocol.startsWith('http') ? { origin: location.origin } : {}),
+      events: {
+        onReady: () => { this.ready = true; this.log('плеер готов'); this.shuffle(); },
+        onStateChange: e => this.onState(e.data),
+        onError: e => this.onError(e.data),
+      },
+    });
+  },
+  load(s) {
+    try {
       if (s.list) this.player.loadPlaylist({ list: s.list, listType: 'playlist', index: 0 });
       else this.player.loadVideoById(pick(s.videos));
-      this.shuffle();
-    }
+    } catch (_) {}
+    this.shuffle();
   },
-  /* случайный ролик из списка и случайное место в нём — как будто включили посреди эфира */
+  /* состояния YouTube: -1 не начат, 0 закончился, 1 идёт, 2 пауза, 3 буферизация, 5 подготовлен */
+  onState(st) {
+    this.ytState = st; this.log('состояние', st);
+    if (st === 1) {
+      this.errors = 0; this.setStatus('playing'); this.syncVolume();
+      if (!this._seeked && this.ch && this.ch.randomStart) {
+        this._seeked = true;
+        setTimeout(() => { try { const d = this.player.getDuration(); if (d > 90) this.player.seekTo(d * rand(0.05, 0.6), true); } catch (_) {} }, 400);
+      }
+    }
+    if (st === 0) { this._seeked = false; this.next(); }
+  },
+  /* 2 — неверный параметр, 5 — ошибка HTML5-плеера, 100 — ролик удалён, 101/150 — владелец запретил встраивание */
+  onError(code) {
+    this.errors++; this.log('ошибка', code, 'подряд', this.errors);
+    if (this.errors >= 6) { this.failed = true; this.msg = `YouTube: ошибка ${code}`; this.setStatus('idle'); return; }
+    this.setStatus('skip');
+    setTimeout(() => { this._seeked = false; this.next(); }, 700);
+  },
+  /* если за несколько секунд видео не пошло — пробуем ещё раз, потом просим клик, потом меняем адрес плеера */
+  watch() {
+    clearTimeout(this._w1); clearTimeout(this._w2); clearTimeout(this._w3);
+    const ch = this.ch;
+    this._w1 = setTimeout(() => { if (this.ch === ch && !this.playing() && this.ready && !this.failed) { this.log('повторный запуск'); try { this.player.mute(); this.player.playVideo(); } catch (_) {} } }, 5000);
+    this._w2 = setTimeout(() => { if (this.ch === ch && !this.playing() && this.ready && !this.failed) this.setStatus('tap'); }, 9000);
+    this._w3 = setTimeout(() => {
+      if (this.ch !== ch || this.playing() || this.failed) return;
+      if (!this.ready || this.ytState === -2) {
+        this.hostIdx++; this.log('плеер не ответил, пробую', this.hosts[this.hostIdx % this.hosts.length]);
+        const s = this.source(ch); if (s) { this.setStatus('starting'); this.create(s); this.watch(); }
+      }
+    }, 14000);
+  },
+  /* клик по экрану (когда браузер не дал запуститься самому) */
+  tap() {
+    if (!this.player || !this.ready) return false;
+    try { this.player.playVideo(); } catch (_) {}
+    return true;
+  },
   shuffle() {
     const ch = this.ch, s = ch && this.source(ch); if (!s || !this.player) return;
-    setTimeout(() => {
+    this._seeked = false;
+    const go = (tries = 0) => {
       try {
-        if (s.list && ch.shuffle !== false) { const n = (this.player.getPlaylist() || []).length; if (n > 1) this.player.playVideoAt(Math.floor(Math.random() * n)); }
-        this.player.playVideo(); this.syncVolume();
-        if (ch.randomStart) setTimeout(() => { try { const d = this.player.getDuration(); if (d > 90) this.player.seekTo(d * rand(0.05, 0.6), true); } catch (_) {} }, 1500);
+        const n = (this.player.getPlaylist && this.player.getPlaylist() || []).length;
+        if (s.list && !n && tries < 10) return setTimeout(() => go(tries + 1), 400);   // плейлист ещё грузится
+        if (s.list && ch.shuffle !== false && n > 1) this.player.playVideoAt(Math.floor(Math.random() * n));
+        else this.player.playVideo();
       } catch (_) {}
-    }, 500);
+    };
+    setTimeout(() => go(), 300);
   },
   next() {
     const s = this.ch && this.source(this.ch); if (!s || !this.player) return;
@@ -840,19 +923,20 @@ const Embed = {
     TV.burstUntil = nowMs() + CFG.tv.staticBurstMs;
   },
   stop() {
-    this.ch = null; this.el.classList.remove('on');
+    this.ch = null; this.el.classList.remove('on'); this.setStatus('idle');
+    clearTimeout(this._w1); clearTimeout(this._w2); clearTimeout(this._w3);
     try { if (this.player && this.ready) this.player.pauseVideo(); } catch (_) {}
   },
+  /* звук включаем только когда ролик уже пошёл: беззвучный автозапуск браузеры разрешают всегда */
   syncVolume() {
     if (!this.player || !this.ready) return;
     try {
-      if (state.muted || !TV.on) this.player.mute();
+      if (state.muted || !TV.on || !this.playing()) this.player.mute();
       else { this.player.unMute(); this.player.setVolume(Math.round(state.tvVolume * 100)); }
     } catch (_) {}
   },
-  /* повторяет «схлопывание» кинескопа при включении и выключении */
   shape(s) {
-    const on = !!(s && s.sx * s.sy > 0 && this.ch);
+    const on = !!(s && s.sx * s.sy > 0 && this.ch && !this.failed);
     this.el.style.transform = on ? `scale(${s.sx.toFixed(3)}, ${Math.max(s.sy, 0.006).toFixed(3)})` : 'scale(0)';
     if (this._on !== on) { this.el.style.opacity = on ? 1 : 0; this._on = on; }
   },
@@ -2740,6 +2824,14 @@ function init() {
   layout();
   addEventListener('resize', layout);
   addEventListener('orientationchange', () => setTimeout(layout, 200));
+
+  // Клик по экрану, когда браузер не дал видео запуститься самому
+  stageEl.addEventListener('click', e => {
+    if (Embed.status !== 'tap' || state.calibrating) return;
+    const r = stageEl.getBoundingClientRect(), z = CFG.zones.screen;
+    const x = (e.clientX - r.left) / r.width * 100, y = (e.clientY - r.top) / r.height * 100;
+    if (x > z.x && x < z.x + z.w && y > z.y && y < z.y + z.h) Embed.tap();
+  });
 
   // Двойной клик по экрану — сесть / встать
   stageEl.addEventListener('dblclick', e => {

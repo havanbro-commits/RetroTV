@@ -31,7 +31,7 @@ const state = {
   weather: CFG.startWeather || 'clear',                // clear | drizzle | downpour
   scene: null, fx: null, fxFrom: null, fxTo: null, fxT0: 0,
   muted: false,
-  ambience: CFG.audio.ambienceVolume,
+  ambience: (() => { try { const v = parseFloat(localStorage.getItem('tubetv.room')); if (v >= 0 && v <= 1) return v; } catch (_) {} return CFG.audio.ambienceVolume; })(),
   vent: (() => { try { const v = parseFloat(localStorage.getItem('tubetv.vent')); if (v >= 0 && v <= 1) return v; } catch (_) {} return CFG.audio.windowLevels[CFG.audio.windowStart]; })(),
   tvVolume: CFG.tv.defaultVolume,
   calibrating: false,
@@ -582,7 +582,7 @@ const TV = {
         if (Embed.failed) { Channels.noVideo(g, W, H, sec, ch, this.ch + 1, Embed.msg); break; }
         g.fillStyle = '#000'; g.fillRect(0, 0, W, H);
         const txt = Embed.screenText();
-        if (txt && Embed.status !== 'tap') Channels.tuning(g, W, H, sec, ch, txt);
+        if (txt) Channels.tuning(g, W, H, sec, ch, txt);
         break;
       }
       default: g.fillStyle = '#777'; g.fillRect(0, 0, W, H);
@@ -976,7 +976,8 @@ const Embed = {
   /* клик по экрану (когда браузер не дал запуститься самому) */
   tap() {
     if (!this.player || !this.ready) return false;
-    try { this.player.playVideo(); } catch (_) {}
+    try { this.player.mute(); this.player.playVideo(); } catch (_) {}
+    this.setStatus('starting');
     return true;
   },
   shuffle() {
@@ -1298,7 +1299,7 @@ const Sound = {
     this.tv.connect(hp).connect(lp).connect(this.master);
 
     this.events = G(1); this.events.connect(this.amb);          // улица: сирена, собаки, дверь в подъезде
-    this.home = G(2); this.home.connect(this.inside);            // квартира: кухня, часы
+    this.home = G(1); this.home.connect(this.inside);            // квартира: кухня, часы
 
     this.buf = { white: this.makeNoise('white'), pink: this.makeNoise('pink'), brown: this.makeNoise('brown') };
     this.verb = ctx.createConvolver(); this.verb.buffer = this.makeImpulse(2.6, 3.2);
@@ -1697,7 +1698,7 @@ const Sound = {
   frying(t) {
     if (this.files.frying) {
       const W = this.throughWall(-0.55, CFG.audio.kitchenCutoff || 1700, this.home);
-      const f = this.playFile('frying', t, W.inp, { vol: 0.6, maxDur: rand(15, 20), fadeOut: 3 });
+      const f = this.playFile('frying', t, W.inp, { vol: CFG.audio.fryingVolume ?? 0.3, maxDur: rand(15, 20), fadeOut: 3 });
       setTimeout(W.done, (f.dur + 2) * 1000);
       return f.dur;
     }
@@ -2251,6 +2252,7 @@ const Zones = {
       v = clamp(Math.round(v * 100) / 100, 0, 1);
       if (v === state.tvVolume) return;
       Sound.setTvVolume(v); Sound.knobTick();
+      const mx = $('#mxTv'); if (mx) mx.value = v;
       crop.style.transform = `rotate(${(v - CFG.tv.defaultVolume) * 270}deg)`;
       TV.osdVolUntil = nowMs() + 1600;
     };
@@ -2807,6 +2809,10 @@ const UI = {
     const intro = $('#intro'); intro.textContent = T.intro;
     setTimeout(() => intro.classList.add('show'), 700);
     $('#powerHint .bubble').textContent = T.powerHint;
+    const tv = $('#mxTv'), room = $('#mxRoom');
+    tv.value = state.tvVolume; room.value = state.ambience;
+    tv.addEventListener('input', () => { Sound.start(); Sound.setTvVolume(+tv.value); TV.osdVolUntil = nowMs() + 1200; });
+    room.addEventListener('input', () => { Sound.start(); Sound.setAmbience(+room.value); try { localStorage.setItem('tubetv.room', room.value); } catch (_) {} });
     const mute = $('#muteBtn');
     mute.addEventListener('click', async () => { await Sound.start(); this.setMuted(!state.muted); });
     $('#seatBtn').addEventListener('click', () => { Sound.start(); Camera.toggle(); });
@@ -2970,6 +2976,8 @@ function init() {
   applyScene(true);
   layout();
   addEventListener('resize', layout);
+  // фокус с клавиатуры (Tab) может «прокрутить» контейнер с overflow:hidden — возвращаем на место
+  for (const el of [$('#app'), stageEl]) el.addEventListener('scroll', () => { el.scrollLeft = 0; el.scrollTop = 0; });
   addEventListener('orientationchange', () => setTimeout(layout, 200));
 
   // Клик по экрану, когда браузер не дал видео запуститься самому

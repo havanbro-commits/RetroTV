@@ -26,6 +26,7 @@
 
       <!-- 2. Экран телевизора: встроенный плеер (под стеклом) + WebGL-кинескоп поверх -->
       <div id="tvEmbed" class="tv-embed" aria-hidden="true">
+        <b class="cover"></b>
         <i class="crt-scan"></i><i class="crt-mask"></i><i class="crt-vig"></i><i class="crt-glass"></i><i class="crt-flicker"></i>
       </div>
       <div id="tvScreen" class="tv-screen"><canvas id="tvCanvas"></canvas></div>
@@ -62,6 +63,10 @@
         <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M6 11V7.5A2.5 2.5 0 0 1 8.5 5h7A2.5 2.5 0 0 1 18 7.5V11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M4.5 11.5a1.5 1.5 0 0 1 3 0V14h9v-2.5a1.5 1.5 0 0 1 3 0V17a1 1 0 0 1-1 1h-13a1 1 0 0 1-1-1z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M7 18v2M17 18v2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
         <span class="long"></span><span class="short"></span>
       </button>
+      <div class="mixer" role="group" aria-label="Громкость">
+        <label class="mx"><span>ТВ</span><input id="mxTv" type="range" min="0" max="1" step="0.01" aria-label="Громкость телевизора"></label>
+        <label class="mx"><span>Комната</span><input id="mxRoom" type="range" min="0" max="1" step="0.01" aria-label="Громкость комнаты: улица, кухня, погода"></label>
+      </div>
       <button id="muteBtn" class="mute" type="button" aria-pressed="false" aria-label="Выключить звук">
         <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
           <path d="M4 9v6h4l5 4V5L8 9H4z" fill="currentColor"/>

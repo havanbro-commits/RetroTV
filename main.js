@@ -96,6 +96,9 @@ const Camera = {
     stageEl.style.transform = `translate3d(${t.x}px, ${t.y}px, 0) scale(${t.k})`;
     root.style.setProperty('--zoom', t.k);
     document.body.classList.toggle('seated', this.seated);
+    // видно ли окно с тюлем в кадре (если нет — WebGL его не перерисовывает)
+    const w = CFG.zones.window, st = state.stage;
+    this.winHidden = this.seated && (t.x + (w.x / 100) * st.w * t.k > innerWidth || t.y + ((w.y + w.h) / 100) * st.h * t.k < 0);
     clearTimeout(this._t);
     if (animate) this._t = setTimeout(() => { stageEl.classList.remove('moving'); TV.resize(); }, CFG.seat.durationMs + 60);
     else TV.resize();
@@ -136,6 +139,11 @@ const sceneFx = () => {
    Тюль — тот же шейдер: бегущие складки с подсветкой и мягкий «парус» порыва.
    Если WebGL недоступен, работает старая схема из картинок (BG).
    ========================================================================== */
+/* «когда браузер освободится» — после загрузки страницы и паузы */
+const idle = (fn, delay = 0) => {
+  const go = () => setTimeout(() => (window.requestIdleCallback ? requestIdleCallback(fn, { timeout: 4000 }) : fn()), delay);
+  if (document.readyState === 'complete') go(); else addEventListener('load', go, { once: true });
+};
 const GLRoom = {
   ok: false, dirty: true,
   cur: { w: [1, 0, 0, 0], s: 0, k: 1 }, tw: {},
@@ -237,18 +245,43 @@ void main(){
     this.u = {};
     for (const n of ['uDay', 'uEve', 'uOver', 'uStorm', 'uSun', 'uW', 'uImg', 'uWin', 'uMinv', 'uAmb', 'uSunC', 'uWinC', 'uSunK', 'uAmp', 'uBillow', 'uPhase', 'uTime', 'uRain', 'uSlant']) this.u[n] = gl.getUniformLocation(prog, n);
     gl.uniform2f(this.u.uImg, IMG_W, IMG_H);
-    const srcs = { uDay: CFG.backgrounds.day.image, uEve: CFG.backgrounds.evening.image, uOver: CFG.backgrounds.overcast.image,
+    /* Текстуры грузим по необходимости: сначала только то, что нужно текущей сцене,
+       остальное — потом, в фоне. Пока картинки нет, на её месте чёрная заглушка 1×1. */
+    this.srcs = { uDay: CFG.backgrounds.day.image, uEve: CFG.backgrounds.evening.image, uOver: CFG.backgrounds.overcast.image,
       uStorm: (CFG.backgrounds.storm || CFG.backgrounds.overcast).image, uSun: CFG.sun.map };
-    const load = (src) => new Promise((res, rej) => { const im = new Image(); im.decoding = 'async'; im.onload = () => res(im); im.onerror = () => rej(new Error('img ' + src)); im.src = src; });
-    return Promise.all(Object.entries(srcs).map(([k, src], i) => load(src).then(im => {
+    this.units = Object.keys(this.srcs); this.tex = {}; this.loading = {};
+    this.units.forEach((k, i) => {
       gl.activeTexture(gl.TEXTURE0 + i);
       const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
-      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, im);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 255]));
       for (const [p, val] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, p, val);
       gl.uniform1i(this.u[k], i);
-    }))).then(() => { this.ok = true; this.resize(); this.dirty = true; return true; });
+      this.tex[k] = t;
+    });
+    return this.need(state.scene).then(() => { this.ok = true; this.resize(); this.dirty = true; return true; });
   },
+  /* какие текстуры нужны сцене */
+  unitsFor(scene) { return { day: ['uDay', 'uSun'], sunset: ['uDay', 'uSun'], evening: ['uEve'], overcast: ['uOver'], storm: ['uStorm'] }[scene] || []; },
+  loadUnit(k) {
+    if (this.loading[k]) return this.loading[k];
+    const gl = this.gl, i = this.units.indexOf(k), src = this.srcs[k];
+    return (this.loading[k] = new Promise((res, rej) => {
+      const im = new Image(); im.decoding = 'async';
+      im.onload = () => {
+        const up = () => {
+          gl.activeTexture(gl.TEXTURE0 + i); gl.bindTexture(gl.TEXTURE_2D, this.tex[k]);
+          gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, im);
+          this.dirty = true; this.loading[k].done = true; res();
+        };
+        (im.decode ? im.decode().catch(() => {}) : Promise.resolve()).then(up);
+      };
+      im.onerror = () => { delete this.loading[k]; rej(new Error('img ' + src)); };
+      im.src = src;
+    }));
+  },
+  need(scene) { return Promise.all(this.unitsFor(scene).map(k => this.loadUnit(k))); },
+  preloadAll() { return Promise.all(this.units.map(k => this.loadUnit(k).catch(() => {}))); },
 
   resize() {
     if (!this.c) return;
@@ -281,6 +314,11 @@ void main(){
   },
   go(scene, instant) {
     const T = this.target(scene); if (!T) return;
+    if (this.ok && !this.unitsFor(scene).every(k => this.loading[k] && this.loading[k].done)) {
+      // картинка сцены ещё не пришла — дождёмся и тогда плавно перейдём
+      this.need(scene).then(() => { if (state.scene === scene) this.go(scene, instant); }).catch(() => {});
+      return;
+    }
     const now = nowMs(), c = this.cur;
     if (instant) { this.cur = { w: T.w.slice(), s: T.s, k: T.k }; this.tw = {}; this.dirty = true; return; }
     const sunMs = Math.abs(T.s - c.s) * (T.s > c.s ? CFG.sun.setMs : CFG.sun.riseMs);
@@ -303,6 +341,12 @@ void main(){
   render(t) {
     if (!this.ok) return;
     const gl = this.gl, u = this.u, c = this.cur, full = this.dirty || this.busy();
+    // в покое тюль перерисовываем 30 раз в секунду (в дождь — каждый кадр); когда сидим у телевизора — окна не видно
+    if (!full) {
+      if (Camera.winHidden && !stageEl.classList.contains('moving')) return;
+      if (!(Weather.level > 0.001) && t - (this._lt || 0) < 31) return;
+    }
+    this._lt = t;
     this.step(t);
     const sp = this.sunParams(clamp(c.s, 0, 1));
     gl.uniform4f(u.uW, c.w[0], c.w[1], c.w[2], c.w[3]);
@@ -337,7 +381,7 @@ const BG = {
       const layer = document.createElement('div');
       layer.className = 'bg-layer is-hidden'; layer.dataset.scene = scene;
       const img = new Image();
-      img.src = def.image; img.alt = ''; img.decoding = 'async'; img.draggable = false;
+      img.dataset.src = def.image; img.alt = ''; img.decoding = 'async'; img.draggable = false;   // src — только когда сцена понадобится
       layer.appendChild(img);
       if (CFG.hires && CFG.hires.images[scene]) {
         if (!this.hiresWrap) { this.hiresWrap = document.createElement('div'); this.hiresWrap.className = 'hires-wrap'; }
@@ -360,7 +404,7 @@ const BG = {
         layer.appendChild(v);
       } else this.addSway(layer, scene);
       bg.appendChild(layer); this.layers[scene] = layer;
-      const b = document.createElement('div'); b.className = 'bd'; b.style.backgroundImage = `url("${def.image}")`; b.style.opacity = 0;
+      const b = document.createElement('div'); b.className = 'bd'; b.dataset.src = def.image; b.style.opacity = 0;
       bd.appendChild(b); this.bds[scene] = b;
     }
     if (this.hiresWrap) bg.appendChild(this.hiresWrap);
@@ -388,6 +432,7 @@ const BG = {
     this.current = scene;
     if (this.hiresWrap) for (const h of this.hiresWrap.children) h.classList.toggle('on', h.dataset.scene === scene);
     if (this.gl) GLRoom.go(scene, instant);
+    this.load(scene);
     const z = ++this.z;
     for (const [el, others] of [[this.layers[scene], this.layers], [this.bds[scene], this.bds]]) {
       el.classList.remove('is-hidden'); el.style.zIndex = z;
@@ -401,6 +446,16 @@ const BG = {
     };
     if (instant) hideOthers(); else this._t = setTimeout(hideOthers, CFG.crossfadeMs + 60);
   },
+  /* картинка сцены: в WebGL-режиме нужна только размытая подложка, иначе — и сам слой */
+  load(scene) {
+    const b = this.bds[scene];
+    if (b && b.dataset.src) { b.style.backgroundImage = `url("${b.dataset.src}")`; delete b.dataset.src; }
+    const img = !this.gl && this.layers[scene] && this.layers[scene].querySelector('img');
+    if (img && img.dataset.src) { img.src = img.dataset.src; delete img.dataset.src; }
+    const si = !this.gl && this.layers[scene] && this.layers[scene].querySelector('svg.sway image[data-href]');
+    if (si) { si.setAttribute('href', si.dataset.href); si.setAttributeNS('http://www.w3.org/1999/xlink', 'xlink:href', si.dataset.href); si.removeAttribute('data-href'); }
+  },
+  preloadAll() { for (const s of Object.keys(this.layers)) this.load(s); },
   loadHires() {
     if (this.hiresWrap) for (const h of this.hiresWrap.children) if (!h.src) h.src = h.dataset.src;
   },
@@ -479,11 +534,13 @@ const BG = {
       <feComposite in="disp" in2="mask" operator="in"/>
     </filter>
   </defs>
-  <image href="${href}" xlink:href="${href}" x="0" y="0" width="${IMG_W}" height="${IMG_H}" preserveAspectRatio="none" filter="url(#${id})"/>
+  <image data-href="${href}" x="0" y="0" width="${IMG_W}" height="${IMG_H}" preserveAspectRatio="none" filter="url(#${id})"/>
 </svg>`;
     layer.insertAdjacentHTML('beforeend', svg);
     layer._off = layer.querySelector('feOffset'); layer._disp = layer.querySelector('feDisplacementMap');
     const comps = layer.querySelectorAll('feComposite'); layer._amp = comps[0]; layer._lean = comps[1];
+    const img = layer.querySelector('img');
+    if (img && !img.dataset.src) { const g = this.gl; this.gl = false; this.load(scene); this.gl = g; }   // сцена уже загружена — сразу
   },
   rebuildSway() { if (this.gl) return; for (const [s, l] of Object.entries(this.layers)) if (!l.querySelector('video')) this.addSway(l, s); },
 };
@@ -540,7 +597,7 @@ const GustLight = {
     if (!this.el) this.el = $('#gustLight');
     const k = (state.fx && state.fx.gust || 0) * clamp(b, 0, 1.2);
     const v = k < 0.004 ? 0 : +k.toFixed(3);
-    if (v !== this.v) { this.el.style.opacity = v; this.v = v; }
+    if (v !== this.v) { this.el.style.opacity = v; this.el.style.display = v ? '' : 'none'; this.v = v; }
   },
 };
 
@@ -2451,7 +2508,6 @@ const Zones = {
       UI.toast(T.weatherNow[state.weather], 2600);
       if (HOVER && el.matches(':hover')) this.showCaption(el);
     } else if (d.egg) {
-      if (d.egg.eveningOnly && state.mode !== 'evening') return;
       this.playEgg(d.egg, el);
     }
   },
@@ -2550,27 +2606,53 @@ const Puppets = {
       this.items[egg.id] = p;
       this.extras(p);
     }
-    this.setMode(state.mode);
+    this.mode = state.scene;
+    idle(() => this.wake(), 1500);
+  },
+  wake() { if (this.live) return; this.live = true; this.setMode(this.mode || state.scene); },
+  /* перед анимацией: картинки предмета загружены и раскодированы (не дольше 1,5 с) */
+  ensure(p) {
+    this.wake();
+    const imgs = [p.sprite, p.el.querySelector('.plate')];
+    const dec = im => im.complete && im.naturalWidth ? Promise.resolve() : (im.decode ? im.decode().catch(() => {}) : new Promise(r => { im.onload = im.onerror = r; }));
+    return Promise.race([Promise.all(imgs.map(dec)), wait(1500)]);
   },
   src(id, mode, plate) { return `assets/eggs/${id}-${plate ? 'plate-' : ''}${mode}.png`; },
+  /* Картинки предметов грузим не сразу, а когда страница уже показалась (или по первому наведению) */
   setMode(mode) {
+    this.mode = mode;
+    if (!this.live) return;
     for (const p of Object.values(this.items)) {
       const id = p.egg.id, cut = this.src(id, mode);
       p.el.querySelector('.plate').src = this.src(id, mode, true);
       p.sprite.src = cut;
+      if (p.sides) for (const s of p.sides) s.src = cut;
       p.el.querySelector('.glow-sprite').src = cut;
       p.el.style.setProperty('--cut', `url("${cut}")`);
       if (p.tt) p.tt.dirty = true;
       if (p.cube) p.cube.dirty = true;
     }
   },
-  hover(id, on) { const p = this.items[id]; if (p) p.el.classList.toggle('hover', on); },
+  hover(id, on) { const p = this.items[id]; if (on) this.wake(); if (p) p.el.classList.toggle('hover', on); },
   busy(id) { const p = this.items[id]; return !!(p && p.busy); },
   /* пиксели картинки → проценты коробки предмета */
   rel(p, px, py) { return [(px - p.box[0]) / p.box[2] * 100, (py - p.box[1]) / p.box[3] * 100]; },
 
   extras(p) {
     const e = p.egg;
+    /* толщина: несколько затемнённых копий силуэта позади — при повороте видно ребро предмета */
+    if (e.depth) {
+      const n = Math.max(3, Math.min(8, Math.round(e.depth / 1.5)));
+      const frag = document.createDocumentFragment();
+      for (let i = n; i >= 1; i--) {
+        const s = document.createElement('img'); s.className = 'side'; s.alt = '';
+        s.style.transform = `translateZ(calc(var(--u) * ${(-e.depth * i / n).toFixed(2)})) scale(.95)`;   // чуть меньше: мягкий край вырезки не даёт тёмного контура
+        s.style.filter = `brightness(${(0.6 - 0.18 * i / n).toFixed(2)}) saturate(.85)`;
+        frag.appendChild(s);
+      }
+      p.body.insertBefore(frag, p.sprite);
+      p.sides = [...p.body.querySelectorAll('.side')];
+    }
     if (e.lcd) {
       const c = document.createElement('canvas'); c.className = 'lcd'; c.width = 100; c.height = 100;
       const [lx, ly] = this.rel(p, e.lcd[0], e.lcd[1]);
@@ -2595,6 +2677,7 @@ const Puppets = {
     const p = this.items[id];
     if (!p || p.busy) return;
     p.busy = true;
+    await this.ensure(p);
     p.el.classList.add('anim');
     try { await (this.anims[p.egg.anim] || this.anims.rattle3d).call(this, p); }
     catch (err) { console.warn('[Tube TV] анимация', id, err); }
@@ -2810,7 +2893,11 @@ const Puppets = {
     if (!gl) return null;
     const VS = 'attribute vec2 a; varying vec2 v; void main(){ v = a * 0.5 + 0.5; gl_Position = vec4(a, 0.0, 1.0); }';
     const FS = `
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
 precision mediump float;
+#endif
 varying vec2 v;
 uniform sampler2D uTex, uProf, uRow;
 uniform float uTheta, uL, uFront;
@@ -2818,7 +2905,7 @@ float sh(float a){ return 0.42 + 0.58 * max(cos(a - uL), 0.0); }
 void main(){
   vec2 uv = vec2(v.x, 1.0 - v.y);
   vec4 pr = texture2D(uProf, vec2(uv.y, 0.5));
-  float c = pr.r, r = pr.g;
+  float c = (pr.r * 65280.0 + pr.b * 255.0) / 65535.0, r = (pr.g * 65280.0 + pr.a * 255.0) / 65535.0;
   if (r < 0.006) { gl_FragColor = vec4(0.0); return; }
   float s = (uv.x - c) / r;
   if (abs(s) > 1.0) { gl_FragColor = vec4(0.0); return; }
@@ -2828,19 +2915,24 @@ void main(){
   vec4 tex = texture2D(uTex, vec2(c + r * sin(p0), uv.y), -0.3);
   float pf = abs(p0) > 1.5707963 ? (p0 > 0.0 ? 3.14159265 - p0 : -3.14159265 - p0) : p0;
   tex.rgb *= clamp(sh(phi) / sh(pf), 0.6, 1.45);
-  // 2) бока и спина: фарфор — средний цвет строки, освещение, блик, складки юбки
-  vec3 base = texture2D(uRow, vec2(uv.y, 0.5)).rgb;
+  // 2) бока и спина: та же фигурка «с обратной стороны» — зеркальная и сильно размытая
+  //    (цвет волос, платья, корзинки остаётся на своих местах, а лицо и мелкие детали исчезают)
+  float pb = p0 > 0.0 ? 3.14159265 - p0 : -3.14159265 - p0;   // точка спины → симметричная ей точка лица
+  float bx = c + r * sin(pb);
+  vec4 back = (texture2D(uTex, vec2(bx, uv.y - 0.012), 2.6) + texture2D(uTex, vec2(bx, uv.y), 2.6) + texture2D(uTex, vec2(bx, uv.y + 0.012), 2.6)) / 3.0;
+  vec3 rowc = texture2D(uRow, vec2(uv.y, 0.5)).rgb;
+  vec3 base = back.a > 0.05 ? mix(back.rgb / back.a, rowc, 0.25) : rowc;
   vec3 N = vec3(sin(phi), 0.0, cos(phi));
   vec3 L = normalize(vec3(sin(uL), 0.25, cos(uL)));
   float dif = max(dot(N, L), 0.0);
-  float spec = pow(max(dot(reflect(-L, N), vec3(0.0, 0.0, 1.0)), 0.0), 28.0);
-  float fold = uv.y > 0.5 ? 0.08 * sin(p0 * 10.0 + uv.y * 7.0) : 0.03 * sin(p0 * 6.0);
-  vec3 mat = base * (0.38 + 0.78 * dif) * (1.0 + fold) + vec3(spec * 0.4);
-  float w = smoothstep(1.85, 1.35, abs(p0));
+  float spec = pow(max(dot(reflect(-L, N), vec3(0.0, 0.0, 1.0)), 0.0), 36.0);
+  float fold = uv.y > 0.55 ? 0.06 * sin(p0 * 9.0 + uv.y * 7.0) : 0.0;
+  vec3 mat = base * (0.62 + 0.5 * dif) * (1.0 + fold) + vec3(spec * 0.22);
+  float w = smoothstep(1.95, 1.2, abs(p0));
   w = mix(1.0, w, uFront);                               // в самом начале и конце — точно как на фото
   vec3 col = mix(mat, tex.rgb, w);
   float a = mix(1.0, tex.a, w);
-  float edge = smoothstep(1.0, 0.93, abs(s));
+  float edge = smoothstep(1.0, 0.9, abs(s));
   gl_FragColor = vec4(col * a * edge, a * edge);
 }`;
     const sh = (t, s) => { const o = gl.createShader(t); gl.shaderSource(o, s); gl.compileShader(o); if (!gl.getShaderParameter(o, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(o)); return o; };
@@ -2881,11 +2973,11 @@ void main(){
         if (d[i + 3] > 200) { R += d[i]; G += d[i + 1]; B += d[i + 2]; n++; }
       }
       if (mn >= 0) { cs[y] = (mn + mx + 1) / 2 / W; rs[y] = (mx - mn + 1) / 2 / W + 1 / W; }
-      if (n) { row[y * 4] = Math.min(255, R / n * 1.18); row[y * 4 + 1] = Math.min(255, G / n * 1.18); row[y * 4 + 2] = Math.min(255, B / n * 1.18); }
+      if (n) { row[y * 4] = Math.min(255, R / n); row[y * 4 + 1] = Math.min(255, G / n); row[y * 4 + 2] = Math.min(255, B / n); }
       row[y * 4 + 3] = 255;
     }
     const sm = (arr, R) => arr.map((_, i) => { let s = 0, k2 = 0; for (let k = -R; k <= R; k++) { const v = arr[i + k]; if (v > 0) { s += v; k2++; } } return arr[i] > 0 && k2 ? s / k2 : 0; });
-    const C = sm(sm(cs, 14), 10), Rr = sm(sm(rs, 6), 4);
+    const C = sm(sm(cs, 20), 14), Rr = sm(sm(rs, 12), 8);
     for (let y = 1; y < H; y++) if (!row[y * 4] && row[(y - 1) * 4]) { row[y * 4] = row[(y - 1) * 4]; row[y * 4 + 1] = row[(y - 1) * 4 + 1]; row[y * 4 + 2] = row[(y - 1) * 4 + 2]; }
     // сглаживаем цвет по высоте (иначе мелкие детали дают полосы) и чуть уводим в фарфоровый
     for (let ch = 0; ch < 3; ch++) {
@@ -2897,7 +2989,11 @@ void main(){
       }
     }
     const prof = new Uint8Array(H * 4);
-    for (let y = 0; y < H; y++) { prof[y * 4] = Math.round(C[y] * 255); prof[y * 4 + 1] = Math.round(clamp(Rr[y], 0, 1) * 255); prof[y * 4 + 3] = 255; }
+    // 16 бит на значение (старший байт в R/G, младший в B/A) — иначе 8-битные ступеньки радиуса дают полосы
+    for (let y = 0; y < H; y++) {
+      const c16 = Math.round(clamp(C[y], 0, 1) * 65535), r16 = Math.round(clamp(Rr[y], 0, 1) * 65535);
+      prof[y * 4] = c16 >> 8; prof[y * 4 + 1] = r16 >> 8; prof[y * 4 + 2] = c16 & 255; prof[y * 4 + 3] = r16 & 255;
+    }
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tt.tex);
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, cv);
@@ -3185,8 +3281,9 @@ function init() {
   state.scene = sceneOf(state.mode, state.weather);
   BG.init();
   try {
-    GLRoom.init().then(() => BG.enableGL()).catch(err => console.warn('[Tube TV] WebGL-комната недоступна, работают картинки:', err.message));
-  } catch (err) { console.warn('[Tube TV] WebGL-комната:', err.message); }
+    GLRoom.init().then(() => { BG.enableGL(); idle(() => GLRoom.preloadAll(), 2500); })
+      .catch(err => { console.warn('[Tube TV] WebGL-комната недоступна, работают картинки:', err.message); idle(() => BG.preloadAll(), 2500); });
+  } catch (err) { console.warn('[Tube TV] WebGL-комната:', err.message); idle(() => BG.preloadAll(), 2500); }
   TV.init();
   Embed.init();
   Light.init();
@@ -3243,6 +3340,8 @@ function init() {
 
   let last = nowMs();
   const frame = t => {
+    // не чаще 60 кадров в секунду: на экранах 120 Гц (MacBook Pro, iPad) иначе вдвое больше работы
+    if (t - last < 14) { requestAnimationFrame(frame); return; }
     const dt = Math.min(64, t - last); last = t;
     if (state.fxT0) {
       const k = smooth(0, 1, clamp((t - state.fxT0) / CFG.crossfadeMs, 0, 1));

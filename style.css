@@ -100,7 +100,6 @@ body.seated .hires-wrap img.hires.loaded.on { opacity: 1; }
   width: var(--yt-w, 1280px) !important; height: var(--yt-h, 720px) !important;
   transform: translate(-50%, -50%) scale(var(--yt-k, .2));
   border: 0; pointer-events: none;
-  filter: saturate(1.08) contrast(1.04);
 }
 /* Плеер всегда видим: Chrome и Safari не запускают «невидимое» видео (opacity: 0).
    Пока идёт «настройка», его закрывает непрозрачная заглушка. */
@@ -224,7 +223,9 @@ body.evening .hot.evening-only { pointer-events: auto; }
 .puppet .body img { position: absolute; inset: 0; width: 100%; height: 100%; display: block; -webkit-user-drag: none; }
 .puppet .sprite { opacity: 0; }
 .puppet.anim .sprite { opacity: 1; }
-.puppet.no-sprite .sprite, .puppet.no-sprite .glow-sprite, .puppet.no-sprite .reel, .puppet.no-sprite .sheen { opacity: 0 !important; transition: none; }
+.puppet .side { opacity: 0; backface-visibility: visible; }
+.puppet.anim .side { opacity: 1; }
+.puppet.no-sprite .sprite, .puppet.no-sprite .side, .puppet.no-sprite .glow-sprite, .puppet.no-sprite .reel, .puppet.no-sprite .sheen { opacity: 0 !important; transition: none; }
 .puppet .glow-sprite {
   opacity: 0; transition: opacity .4s ease;
   filter: drop-shadow(0 0 calc(var(--u) * 1.6) rgba(var(--warm), .95)) drop-shadow(0 0 calc(var(--u) * 6) rgba(var(--warm), .6)) brightness(1.14);
@@ -348,7 +349,7 @@ body.evening .hot.evening-only { pointer-events: auto; }
 /* ---------- плёнка и виньетка ---------- */
 .grain {
   z-index: 2;
-  position: absolute; left: -50%; top: -50%; width: 200%; height: 200%;
+  position: absolute; left: -192px; top: -192px; right: -192px; bottom: -192px;   /* запас ровно в одну плитку: слой вдвое меньше прежнего */
   background-image: var(--grain-img, none);
   background-size: 192px 192px;
   opacity: var(--grain-opacity);
@@ -359,12 +360,13 @@ body.evening .hot.evening-only { pointer-events: auto; }
 }
 @keyframes grain {
   0%   { transform: translate(0, 0); }
-  17%  { transform: translate(-3%, 2%); }
-  33%  { transform: translate(2%, -4%); }
-  50%  { transform: translate(-5%, -1%); }
-  67%  { transform: translate(4%, 3%); }
-  83%  { transform: translate(-1%, 5%); }
+  17%  { transform: translate(-61px, 37px); }
+  33%  { transform: translate(43px, -83px); }
+  50%  { transform: translate(-101px, -19px); }
+  67%  { transform: translate(79px, 59px); }
+  83%  { transform: translate(-23px, 97px); }
   100% { transform: translate(0, 0); }
+}
 }
 .vignette {
   z-index: 2;

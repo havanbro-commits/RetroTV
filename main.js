@@ -32,6 +32,7 @@ const state = {
   scene: null, fx: null, fxFrom: null, fxTo: null, fxT0: 0,
   muted: false,
   ambience: CFG.audio.ambienceVolume,
+  vent: (() => { try { const v = parseFloat(localStorage.getItem('tubetv.vent')); if (v >= 0 && v <= 1) return v; } catch (_) {} return CFG.audio.windowLevels[CFG.audio.windowStart]; })(),
   tvVolume: CFG.tv.defaultVolume,
   calibrating: false,
   firstOnDone: false,
@@ -266,13 +267,14 @@ const Wind = {
     this.phase += dt / 1000 * (10 + 75 * this.w);
     if (t - this.lastApply > 33) {                                    // ~30 к/с для фильтра
       this.lastApply = t;
-      const scale = (W.scaleCalm + W.scaleGust * this.w).toFixed(2), P = BG._maps ? BG._maps.period : 120;
+      const open = 0.25 + 0.75 * clamp(state.vent / 0.7, 0, 1);          // закрытая форточка — ветра почти нет
+      const scale = ((W.scaleCalm + W.scaleGust * this.w) * open).toFixed(2), P = BG._maps ? BG._maps.period : 120;
       const dx = (-(this.phase % P)).toFixed(2);
       for (const l of Object.values(BG.layers)) {
         if (l.classList.contains('is-hidden') || !l._disp) continue;
         l._disp.setAttribute('scale', scale); l._off.setAttribute('dx', dx);
       }
-      Sound.wind(this.w);
+      Sound.wind(this.w * (0.3 + 0.7 * clamp(state.vent / 0.7, 0, 1)));
     }
   },
 };
@@ -564,7 +566,8 @@ const TV = {
       gl.uniform1f(u.uFlicker, REDUCED ? 0 : 1);
       gl.uniform1f(u.uCurv, CFG.screen.curvature);
       gl.uniform1f(u.uScan, Math.min(240, H / 2.6));
-      gl.uniform1f(u.uGrain, REDUCED ? 0.02 : 0.07);
+      const yt = ch.type === 'youtube' && Embed.showing();
+      gl.uniform1f(u.uGrain, (REDUCED ? 0.02 : 0.07) * (yt ? CFG.embed.crt : 1));
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     } else if (this.c2d) {
       const c = this.c2d, W = this.canvas.width, H = this.canvas.height;
@@ -583,7 +586,7 @@ const TV = {
   /* Средний цвет экрана — для свечения на стене */
   sampleAvg(st) {
     let r = 0.6, g = 0.62, b = 0.68;
-    if (this.channel().type === 'youtube' && !Embed.failed) {          // пиксели плеера недоступны — «живое» голубое мерцание
+    if (this.channel().type === 'youtube' && Embed.showing()) {          // пиксели плеера недоступны — «живое» голубое мерцание
       const k = nowMs() / 1000;
       const v = 0.45 + 0.25 * Math.sin(k * 1.3) * Math.sin(k * 0.37) + 0.1 * Math.random();
       this.avg = [v * 0.85, v * 0.92, v * 1.05]; this.avgLum = v; return;
@@ -728,7 +731,7 @@ const Channels = {
   /* «поиск сигнала»: снег и надпись, пока плеер грузится */
   tuning(g, W, H, sec, ch, txt) {
     const id = g.createImageData(W / 4 | 0, H / 4 | 0), d = id.data;
-    for (let i = 0; i < d.length; i += 4) { const v = Math.random() * 120; d[i] = d[i + 1] = d[i + 2] = v; d[i + 3] = 255; }
+    for (let i = 0; i < d.length; i += 4) { const v = 40 + Math.random() * 140; d[i] = d[i + 1] = d[i + 2] = v; d[i + 3] = 255; }
     if (!this._snow || this._snow.width !== id.width) { this._snow = document.createElement('canvas'); this._snow.width = id.width; this._snow.height = id.height; }
     this._snow.getContext('2d').putImageData(id, 0, 0);
     g.imageSmoothingEnabled = false; g.drawImage(this._snow, 0, 0, W, H); g.imageSmoothingEnabled = true;
@@ -788,7 +791,17 @@ const Embed = {
       backgroundPosition: `calc(var(--u) * ${-z.x}) calc(var(--u) * ${-z.y})`,
     });
   },
-  resize() { placeEl(this.el, CFG.zones.screen); },
+  /* плеер рендерится крупным (YouTube выбирает качество по размеру плеера)
+     и уменьшается трансформацией; overscan прячет края кадра с надписями */
+  resize() {
+    placeEl(this.el, CFG.zones.screen);
+    const E = CFG.embed, z = zpx(CFG.zones.screen), u = state.stage.u || 1;
+    const W = z.w * u, H = z.h * u, PW = E.playerWidth, PH = PW * 9 / 16;
+    const k = Math.max(H / PH, W / PW) * E.overscan;
+    this.el.style.setProperty('--yt-w', PW + 'px'); this.el.style.setProperty('--yt-h', PH + 'px');
+    this.el.style.setProperty('--yt-k', k.toFixed(4));
+    root.style.setProperty('--crt', E.crt);
+  },
   source(ch) {
     const s = ch.source || {};
     if (s.playlist) return { list: s.playlist };
@@ -799,9 +812,11 @@ const Embed = {
   /* что показать на экране, пока видео не идёт */
   screenText() {
     if (this.failed) return null;
+    if (this.playing()) return this.visible ? null : 'НАСТРОЙКА…';
     return { loading: 'ПОИСК СИГНАЛА…', starting: 'НАСТРОЙКА…', tap: 'НАЖМИТЕ НА ЭКРАН', skip: 'РОЛИК НЕДОСТУПЕН — ДАЛЬШЕ' }[this.status] || null;
   },
   playing() { return this.status === 'playing'; },
+  showing() { return this.playing() && this.visible; },
   api() {
     if (this.loading) return this.loading;
     this.loading = new Promise((res, rej) => {
@@ -822,7 +837,7 @@ const Embed = {
     this.el.classList.toggle('clickable', s === 'tap');
   },
   async play(ch) {
-    this.ch = ch; this.failed = false; this.msg = ''; this.errors = 0;
+    this.ch = ch; this.failed = false; this.msg = ''; this.errors = 0; this.show(false);
     const s = this.source(ch);
     if (!s) { this.failed = true; this.msg = 'впишите канал в config.js'; return; }
     this.setStatus('loading');
@@ -845,8 +860,8 @@ const Embed = {
     this.log('создаю плеер', hostUrl, s);
     // ВАЖНО: для плейлиста поля videoId быть не должно вовсе (даже пустого) — иначе «Invalid video id»
     const opts = {
-      width: '640', height: '360', host: hostUrl,
-      playerVars: Object.assign({ autoplay: 1, mute: 1, controls: 0, disablekb: 1, fs: 0, iv_load_policy: 3, playsinline: 1, rel: 0, cc_load_policy: 0 },
+      width: String(CFG.embed.playerWidth), height: String(Math.round(CFG.embed.playerWidth * 9 / 16)), host: hostUrl,
+      playerVars: Object.assign({ autoplay: 1, mute: 1, controls: 0, disablekb: 1, fs: 0, iv_load_policy: 3, playsinline: 1, rel: 0, cc_load_policy: CFG.embed.captions ? 1 : 0, hl: CFG.embed.lang, cc_lang_pref: CFG.embed.lang },
         s.list ? { listType: 'playlist', list: s.list } : {}, location.protocol.startsWith('http') ? { origin: location.origin } : {}),
       events: {
         onReady: () => { this.ready = true; this.log('плеер готов'); this.shuffle(); },
@@ -868,14 +883,26 @@ const Embed = {
   /* состояния YouTube: -1 не начат, 0 закончился, 1 идёт, 2 пауза, 3 буферизация, 5 подготовлен */
   onState(st) {
     this.ytState = st; this.log('состояние', st);
+    clearTimeout(this._reveal);
     if (st === 1) {
-      this.errors = 0; this.setStatus('playing'); this.syncVolume();
+      this.errors = 0; this.setStatus('playing'); this.syncVolume(); this.noCaptions();
+      // YouTube пару секунд показывает название и логотип — держим «настройку», потом открываем картинку
+      this._reveal = setTimeout(() => { if (this.ytState === 1) this.show(true); }, CFG.embed.revealDelayMs);
       if (!this._seeked && this.ch && this.ch.randomStart) {
         this._seeked = true;
         setTimeout(() => { try { const d = this.player.getDuration(); if (d > 90) this.player.seekTo(d * rand(0.05, 0.6), true); } catch (_) {} }, 400);
       }
     }
+    else this.show(false);                                             // пауза, буферизация, конец — под снегом
     if (st === 0) { this._seeked = false; this.next(); }
+  },
+  visible: false,
+  show(v) { this.visible = v; this.el.classList.toggle('revealed', v); },
+  noCaptions() {
+    if (CFG.embed.captions || !this.player) return;
+    try { this.player.unloadModule('captions'); } catch (_) {}
+    try { this.player.unloadModule('cc'); } catch (_) {}
+    try { this.player.setOption('captions', 'track', {}); } catch (_) {}
   },
   /* 2 — неверный параметр, 5 — ошибка HTML5-плеера, 100 — ролик удалён, 101/150 — владелец запретил встраивание */
   onError(code) {
@@ -926,7 +953,7 @@ const Embed = {
     TV.burstUntil = nowMs() + CFG.tv.staticBurstMs;
   },
   stop() {
-    this.ch = null; this.el.classList.remove('on'); this.setStatus('idle');
+    this.ch = null; this.el.classList.remove('on'); this.setStatus('idle'); this.show(false);
     clearTimeout(this._w1); clearTimeout(this._w2); clearTimeout(this._w3);
     try { if (this.player && this.ready) this.player.pauseVideo(); } catch (_) {}
   },
@@ -1180,13 +1207,17 @@ const Sound = {
     comp.threshold.value = -16; comp.knee.value = 12; comp.ratio.value = 3; comp.attack.value = 0.005; comp.release.value = 0.25;
     this.master.connect(comp).connect(ctx.destination);
 
-    this.amb = G(state.ambience); this.amb.connect(this.master);
+    // улица идёт через «форточку»: громкость + срез верхов, когда она прикрыта
+    this.street = this.f('lowpass', 1800 + 9000 * state.vent, 0.5);
+    this.amb = G(state.ambience * state.vent); this.amb.connect(this.street).connect(this.master);
+    this.inside = G(state.ambience * 0.5); this.inside.connect(this.master);
     this.sfx = G(CFG.audio.sfxVolume); this.sfx.connect(this.master);
     this.tv = G(state.tvVolume);
     const hp = this.f('highpass', 160), lp = this.f('lowpass', 6500);
     this.tv.connect(hp).connect(lp).connect(this.master);
 
-    this.events = G(1); this.events.connect(this.amb);
+    this.events = G(1); this.events.connect(this.amb);          // улица: сирена, собаки, дверь в подъезде
+    this.home = G(2); this.home.connect(this.inside);            // квартира: кухня, часы
 
     this.buf = { white: this.makeNoise('white'), pink: this.makeNoise('pink'), brown: this.makeNoise('brown') };
     this.verb = ctx.createConvolver(); this.verb.buffer = this.makeImpulse(2.6, 3.2);
@@ -1331,7 +1362,21 @@ const Sound = {
     for (const ch of CFG.channels) if (ch._video && !ch._src) ch._video.muted = m;
     Embed.syncVolume();
   },
-  setAmbience(v) { state.ambience = v; if (this.amb) this.amb.gain.setTargetAtTime(v, this.ctx.currentTime, 0.08); },
+  setAmbience(v) { state.ambience = v; this.applyVent(); },
+  /* форточка: улица и события тише/громче, тон комнаты не меняется */
+  applyVent() {
+    if (!this.amb) return;
+    const t = this.ctx.currentTime;
+    this.amb.gain.setTargetAtTime(state.ambience * state.vent, t, 0.25);
+    if (this.inside) this.inside.gain.setTargetAtTime(state.ambience * 0.5, t, 0.25);
+    if (this.street) this.street.frequency.setTargetAtTime(1800 + 9000 * state.vent, t, 0.25);
+  },
+  ventClick() {
+    if (!this.started) return;
+    const t = this.ctx.currentTime + 0.01;
+    this.burst(t, { dur: 0.05, vol: 0.12, type: 'lowpass', f: 700, pan: 0.6 });
+    this.burst(t + 0.03, { dur: 0.02, vol: 0.14, f: 1800, q: 2, pan: 0.6 });
+  },
   setTvVolume(v) {
     state.tvVolume = v;
     if (this.tv) this.tv.gain.setTargetAtTime(v, this.ctx.currentTime, 0.04);
@@ -1354,10 +1399,10 @@ const Sound = {
     this.startGroup(key);
   },
   makeRoomTone() {
-    return this.loop('room-tone', this.amb, 0.5, () => {
+    return this.loop('room-tone', this.inside, 0.5, () => {
       const n = this.noise('brown'), lp = this.f('lowpass', 240), gn = this.g(0.2);
-      n.connect(lp).connect(gn).connect(this.amb); n.start(0, Math.random() * 3);
-      const hum = this.o('sine', 100), hg = this.g(0.0032); hum.connect(hg).connect(this.amb); hum.start();
+      n.connect(lp).connect(gn).connect(this.inside); n.start(0, Math.random() * 3);
+      const hum = this.o('sine', 100), hg = this.g(0.0032); hum.connect(hg).connect(this.inside); hum.start();
       return { stop: at => { gn.gain.setTargetAtTime(0, at, 0.3); hg.gain.setTargetAtTime(0, at, 0.3); n.stop(at + 2); hum.stop(at + 2); } };
     });
   },
@@ -1556,21 +1601,21 @@ const Sound = {
     return b;
   },
   /* «Из другой комнаты»: срез верхов двумя фильтрами, тёплая середина, короткое эхо кухни */
-  throughWall(pan = -0.55, cutoff = 1700) {
+  throughWall(pan = -0.55, cutoff = 1700, dest = this.events) {
     if (!this._kitchen) {
       this._kitchen = this.ctx.createConvolver(); this._kitchen.buffer = this.makeImpulse(0.7, 4.5);
-      const kp = this.p(pan); this._kitchen.connect(kp).connect(this.events);
+      const kp = this.p(pan); this._kitchen.connect(kp).connect(dest);
     }
     const inp = this.g(1), hp = this.f('highpass', 140), w1 = this.f('lowpass', cutoff, 0.6), w2 = this.f('lowpass', cutoff * 1.4, 0.5), body = this.f('peaking', 380, 0.9);
     body.gain.value = 4;
     inp.connect(hp).connect(w1).connect(w2).connect(body);
-    const pn = this.p(pan); body.connect(pn).connect(this.events);
+    const pn = this.p(pan); body.connect(pn).connect(dest);
     const room = this.g(0.55); body.connect(room).connect(this._kitchen);
     return { inp, done: () => { inp.disconnect(); body.disconnect(); room.disconnect(); } };
   },
   frying(t) {
     if (this.files.frying) {
-      const W = this.throughWall(-0.55, CFG.audio.kitchenCutoff || 1700);
+      const W = this.throughWall(-0.55, CFG.audio.kitchenCutoff || 1700, this.home);
       const f = this.playFile('frying', t, W.inp, { vol: 0.6, maxDur: rand(15, 20), fadeOut: 3 });
       setTimeout(W.done, (f.dur + 2) * 1000);
       return f.dur;
@@ -1647,12 +1692,12 @@ const Sound = {
     return T;
   },
   clock(t) {
-    const f = this.playFile('clock', t, this.events, { vol: 0.8, pan: -0.3 }); if (f) return f.dur;
+    const f = this.playFile('clock', t, this.home, { vol: 0.8, pan: -0.3 }); if (f) return f.dur;
     const n = irand(9, 13);
     for (let i = 0; i < n; i++) {
       const tt = t + i * 1.0, v = 0.22 * Math.min(1, (i + 1) / 3, (n - i) / 3);
-      this.burst(tt, { dur: 0.014, vol: v, f: i % 2 ? 2300 : 3200, q: 4, dest: this.events, pan: -0.3 });
-      this.tone(tt, { f: i % 2 ? 1700 : 2100, dur: 0.03, vol: v * 0.25, dest: this.events, pan: -0.3 });
+      this.burst(tt, { dur: 0.014, vol: v, f: i % 2 ? 2300 : 3200, q: 4, dest: this.home, pan: -0.3 });
+      this.tone(tt, { f: i % 2 ? 1700 : 2100, dur: 0.03, vol: v * 0.25, dest: this.home, pan: -0.3 });
     }
     return n;
   },
@@ -1991,6 +2036,22 @@ const Events = {
 /* ==========================================================================
    7. КЛИКАБЕЛЬНЫЕ ЗОНЫ И ПАСХАЛКИ
    ========================================================================== */
+/* Форточка — регулятор уличного шума, спрятанный в интерьере */
+const Vent = {
+  index() { const L = CFG.audio.windowLevels; let best = 0; L.forEach((v, i) => { if (Math.abs(v - state.vent) < Math.abs(L[best] - state.vent)) best = i; }); return best; },
+  set(v, quiet) {
+    state.vent = clamp(Math.round(v * 100) / 100, 0, 1);
+    try { localStorage.setItem('tubetv.vent', String(state.vent)); } catch (_) {}
+    Sound.applyVent();
+    Zones.refreshLabels();
+    if (!quiet) UI.toast(T.drapeNow[this.index()], 2200);
+  },
+  cycle() {
+    const L = CFG.audio.windowLevels, i = (this.index() + 1) % L.length;
+    Sound.ventClick(); this.set(L[i]);
+  },
+};
+
 const Zones = {
   wrap: $('#zones'), cap: $('#caption'), els: {},
   knobAngle: { channelKnob: 0, volumeKnob: 0 },
@@ -2001,6 +2062,7 @@ const Zones = {
       { id: 'volumeKnob', cls: 'knob volume', pad: 0, label: () => T.volumeKnob },
       { id: 'lamp', cls: 'lamp', pad: 0.05, label: () => T.lamp[nextIn(CFG.timeCycle, state.mode)] },
       { id: 'window', cls: 'window', pad: 0, label: () => T.weatherNext[nextIn(CFG.weatherCycle, state.weather)] },
+      { id: 'drape', cls: 'drape', pad: 0, label: () => T.drape[Vent.index()] },
       ...CFG.eggs.map(e => ({ id: e.id, cls: 'egg' + (e.eveningOnly ? ' evening-only' : ''), pad: 0.22, label: () => e.label, egg: e })),
     ];
   },
@@ -2051,6 +2113,7 @@ const Zones = {
     el.addEventListener('focus', () => { this.showCaption(el); if (d.egg) Puppets.hover(d.id, true); });
     el.addEventListener('blur', () => { this.hideCaption(); if (d.egg) Puppets.hover(d.id, false); });
     if (d.id === 'volumeKnob') return this.bindVolume(el);
+    if (d.id === 'drape') el.addEventListener('wheel', e => { e.preventDefault(); Sound.start(); Vent.set(state.vent + (e.deltaY < 0 ? 0.04 : -0.04), true); this.showCaption(el); }, { passive: false });
     if (d.id === 'channelKnob') {
       el.addEventListener('wheel', e => {
         e.preventDefault();
@@ -2077,6 +2140,9 @@ const Zones = {
     } else if (d.id === 'lamp') {
       Sound.lampClick();
       setMode(nextIn(CFG.timeCycle, state.mode));
+      if (HOVER && el.matches(':hover')) this.showCaption(el);
+    } else if (d.id === 'drape') {
+      Vent.cycle();
       if (HOVER && el.matches(':hover')) this.showCaption(el);
     } else if (d.id === 'window') {
       Sound.windowLatch();
@@ -2660,9 +2726,6 @@ const UI = {
     const intro = $('#intro'); intro.textContent = T.intro;
     setTimeout(() => intro.classList.add('show'), 700);
     $('#powerHint .bubble').textContent = T.powerHint;
-    $('.amb-label').textContent = T.ambience;
-    const amb = $('#ambVol'); amb.value = state.ambience;
-    amb.addEventListener('input', () => { Sound.setAmbience(+amb.value); });
     const mute = $('#muteBtn');
     mute.addEventListener('click', async () => { await Sound.start(); this.setMuted(!state.muted); });
     $('#seatBtn').addEventListener('click', () => { Sound.start(); Camera.toggle(); });

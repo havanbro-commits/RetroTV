@@ -843,9 +843,9 @@ const Embed = {
     this.ready = false;
     const hostUrl = this.hosts[this.hostIdx % this.hosts.length];
     this.log('создаю плеер', hostUrl, s);
-    this.player = new YT.Player('ytHost', {
+    // ВАЖНО: для плейлиста поля videoId быть не должно вовсе (даже пустого) — иначе «Invalid video id»
+    const opts = {
       width: '640', height: '360', host: hostUrl,
-      videoId: s.videos ? pick(s.videos) : undefined,
       playerVars: Object.assign({ autoplay: 1, mute: 1, controls: 0, disablekb: 1, fs: 0, iv_load_policy: 3, playsinline: 1, rel: 0, cc_load_policy: 0 },
         s.list ? { listType: 'playlist', list: s.list } : {}, location.protocol.startsWith('http') ? { origin: location.origin } : {}),
       events: {
@@ -853,7 +853,10 @@ const Embed = {
         onStateChange: e => this.onState(e.data),
         onError: e => this.onError(e.data),
       },
-    });
+    };
+    if (s.videos) opts.videoId = pick(s.videos);
+    try { this.player = new YT.Player('ytHost', opts); }
+    catch (e) { this.log('плеер не создался:', e.message); this.failed = true; this.msg = 'YouTube: ' + e.message; this.setStatus('idle'); }
   },
   load(s) {
     try {

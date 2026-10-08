@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Tube TV</title>
+  <!-- v0.3 -->
+  <meta name="description" content="Комната середины 90-х: ламповый телевизор, июньский свет, жизнь квартиры вокруг.">
+  <meta name="theme-color" content="#1a110a">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Neucha&family=Press+Start+2P&family=Lobster&display=swap" rel="stylesheet">
+  <link rel="preload" as="image" href="assets/room-day.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Размытая подложка: видна, только если сцена не закрывает экран целиком (вертикальный телефон) -->
+    <div class="backdrop" aria-hidden="true"></div>
+
+    <div id="stage" aria-label="Комната с телевизором">
+      <!-- 1. Фон: день / вечер (видео или картинка + покачивание тюля) -->
+      <div id="bg" class="layer"></div>
+
+      <canvas id="rain" class="rain" aria-hidden="true"></canvas>
+
+      <!-- 2. Экран телевизора: встроенный плеер (под стеклом) + WebGL-кинескоп поверх -->
+      <div id="tvEmbed" class="tv-embed" aria-hidden="true">
+        <i class="crt-scan"></i><i class="crt-mask"></i><i class="crt-vig"></i><i class="crt-glass"></i><i class="crt-flicker"></i>
+      </div>
+      <div id="tvScreen" class="tv-screen"><canvas id="tvCanvas"></canvas></div>
+
+      <!-- 3. Свет -->
+      <div id="glow" class="glow" aria-hidden="true"><i class="g-r"></i><i class="g-g"></i><i class="g-b"></i></div>
+      <div id="siren" class="siren" aria-hidden="true">
+        <i class="s-red"></i><i class="s-blue"></i><b class="gobo"></b>
+        <div class="s-win"><i class="w-red"></i><i class="w-blue"></i></div>
+      </div>
+      <canvas id="dust" class="dust" aria-hidden="true"></canvas>
+      <div id="dim" class="dim" aria-hidden="true"></div>
+      <div id="flash" class="flash" aria-hidden="true"></div>
+
+      <!-- 4. Кликабельные зоны -->
+      <div id="zones" class="zones"></div>
+      <div id="fx" class="fx" aria-hidden="true"></div>
+      <div id="caption" class="caption" role="status"></div>
+      <div id="powerHint" class="power-hint" aria-hidden="true"><span class="ring"></span><span class="bubble"></span></div>
+
+      <!-- Калибровка (клавиша D) -->
+      <div id="calib" class="calib" hidden></div>
+    </div>
+
+    <div class="grain" aria-hidden="true"></div>
+    <div class="vignette" aria-hidden="true"></div>
+    <div class="vignette focus" aria-hidden="true"></div>
+    <div id="ver" class="ver" aria-hidden="true"></div>
+
+    <!-- 5. Интерфейс -->
+    <div class="ui">
+      <button id="seatBtn" class="seat" type="button" aria-pressed="false">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M6 11V7.5A2.5 2.5 0 0 1 8.5 5h7A2.5 2.5 0 0 1 18 7.5V11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M4.5 11.5a1.5 1.5 0 0 1 3 0V14h9v-2.5a1.5 1.5 0 0 1 3 0V17a1 1 0 0 1-1 1h-13a1 1 0 0 1-1-1z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M7 18v2M17 18v2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        <span class="long"></span><span class="short"></span>
+      </button>
+      <label class="amb" title="Громкость фона">
+        <span class="amb-label"></span>
+        <input id="ambVol" type="range" min="0" max="1" step="0.01" aria-label="Громкость фона">
+      </label>
+      <button id="muteBtn" class="mute" type="button" aria-pressed="false" aria-label="Выключить звук">
+        <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+          <path d="M4 9v6h4l5 4V5L8 9H4z" fill="currentColor"/>
+          <path class="wave" d="M16 8.5a5 5 0 0 1 0 7M18.5 6a8.5 8.5 0 0 1 0 12" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round"/>
+          <path class="cross" d="M16.5 9.5l5 5m0-5l-5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+        </svg>
+      </button>
+    </div>
+    <div id="intro" class="intro"></div>
+    <div id="toast" class="toast"></div>
+
+    <div id="calibPanel" class="calib-panel" hidden>
+      <div class="cp-head"><b>Калибровка</b> <span class="cp-sel">выберите зону</span></div>
+      <div class="cp-hint">Тяните рамку — переместить, уголок — изменить размер. Большие жёлтые слои (screen, glow, window, siren, dust) тянутся за ярлык. Стрелки: сдвиг 0.1% (Shift — 1%), Alt+стрелки — размер. D — выйти.</div>
+      <div class="cp-row">
+        <button type="button" data-act="copy" class="cp-main">Скопировать конфиг</button>
+        <button type="button" data-act="mode">День / вечер</button>
+        <button type="button" data-act="tv">ТВ вкл/выкл</button>
+      </div>
+      <div class="cp-row cp-events">
+        <button type="button" data-ev="siren">Сирена</button>
+        <button type="button" data-ev="frying">Яичница</button>
+        <button type="button" data-ev="clock">Часы</button>
+        <button type="button" data-ev="door">Дверь</button>
+        <button type="button" data-ev="dog">Собака</button>
+      </div>
+      <div class="cp-next"></div>
+      <textarea class="cp-out" readonly spellcheck="false" rows="6" placeholder="Здесь появится JSON зон — вставьте его в config.js вместо блока zones"></textarea>
+    </div>
+  </div>
+
+  <script src="config.js"></script>
+  <script src="main.js"></script>
+</body>
+</html>

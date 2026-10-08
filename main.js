@@ -34,6 +34,8 @@ const state = {
   ambience: (() => { try { const v = parseFloat(localStorage.getItem('tubetv.room')); if (v >= 0 && v <= 1) return v; } catch (_) {} return CFG.audio.ambienceVolume; })(),
   vent: (() => { try { const v = parseFloat(localStorage.getItem('tubetv.vent')); if (v >= 0 && v <= 1) return v; } catch (_) {} return CFG.audio.windowLevels[CFG.audio.windowStart]; })(),
   tvVolume: CFG.tv.defaultVolume,
+  headphones: (() => { try { const v = localStorage.getItem('tubetv.phones'); if (v === '0' || v === '1') return v === '1'; } catch (_) {} return CFG.audio.headphones !== false; })(),
+  radioVolume: (() => { try { const v = parseFloat(localStorage.getItem('tubetv.radio')); if (v >= 0 && v <= 1) return v; } catch (_) {} return CFG.radio ? CFG.radio.volume : 0.7; })(),
   calibrating: false,
   firstOnDone: false,
   stage: { left: 0, top: 0, w: 1, h: 1, u: 1 },
@@ -100,13 +102,14 @@ const Camera = {
     const w = CFG.zones.window, st = state.stage;
     this.winHidden = this.seated && (t.x + (w.x / 100) * st.w * t.k > innerWidth || t.y + ((w.y + w.h) / 100) * st.h * t.k < 0);
     clearTimeout(this._t);
-    if (animate) this._t = setTimeout(() => { stageEl.classList.remove('moving'); TV.resize(); }, CFG.seat.durationMs + 60);
-    else TV.resize();
+    if (animate) this._t = setTimeout(() => { stageEl.classList.remove('moving'); TV.resize(); Radio.resize(); }, CFG.seat.durationMs + 60);
+    else { TV.resize(); Radio.resize(); }
   },
   toggle(on = !this.seated) {
     if (on === this.seated) return;
     this.seated = on;
     Zones.hideCaption();
+    if (Sound.started) Sound.seat(on);
     if (on) { stageEl.classList.remove('letterbox-y', 'letterbox-x'); BG.loadHires(); this.apply(true); }
     else { this.apply(true); setTimeout(layout, CFG.seat.durationMs + 80); }
     UI.seatLabel();
@@ -614,6 +617,7 @@ function applyScene(instant) {
   state.fxFrom = Object.assign({}, state.fx || sceneFx()); state.fxTo = sceneFx(); state.fxT0 = instant ? 0 : nowMs();
   if (instant) state.fx = Object.assign({}, state.fxTo);
   Puppets.setMode && Puppets.items && Puppets.setMode(state.scene);
+  Radio.setScene(state.scene);
   Sound.setScene();
   Weather.set(state.weather);
   Dust.setScene();
@@ -1561,18 +1565,36 @@ const Sound = {
     const G = v => { const n = ctx.createGain(); n.gain.value = v; return n; };
 
     this.master = G(state.muted ? 0 : CFG.audio.master);
+    /* «Ламповый» мастер: чуть больше тёплого низа, мягче верх, плавное скругление пиков */
+    const warm = this.f('lowshelf', 190); warm.gain.value = 2.5;
+    const soft = this.f('highshelf', 7200); soft.gain.value = -3.5;
+    const sat = ctx.createWaveShaper(); sat.curve = this.softCurve(1.25); sat.oversample = '2x';
     const comp = ctx.createDynamicsCompressor();
     comp.threshold.value = -16; comp.knee.value = 12; comp.ratio.value = 3; comp.attack.value = 0.005; comp.release.value = 0.25;
-    this.master.connect(comp).connect(ctx.destination);
+    this.master.connect(warm).connect(soft).connect(sat).connect(comp).connect(ctx.destination);
+
+    /* Объём для наушников: слушатель сидит в кресле лицом к телевизору (смотрит в −Z, вправо — +X) */
+    this.hrtf = state.headphones;
+    this.panners = new Set();
+    const L = ctx.listener;
+    if (L.positionX) { L.positionX.value = 0; L.positionY.value = 0; L.positionZ.value = 0; L.forwardX.value = 0; L.forwardY.value = 0; L.forwardZ.value = -1; L.upX.value = 0; L.upY.value = 1; L.upZ.value = 0; }
+    else if (L.setOrientation) { L.setPosition(0, 0, 0); L.setOrientation(0, 0, -1, 0, 1, 0); }
+    // комната: короткий тёплый отзвук (ковры, шкаф, шторы) — в него понемногу уходит всё, что звучит внутри
+    this.roomVerb = ctx.createConvolver(); this.roomVerb.buffer = this.makeRoomImpulse(1.3);
+    this.roomOut = G(0.26); this.roomVerb.connect(this.roomOut).connect(this.master);
 
     // улица идёт через «форточку»: громкость + срез верхов, когда она прикрыта
     this.street = this.f('lowpass', 1800 + 9000 * state.vent, 0.5);
     this.amb = G(state.ambience * state.vent); this.amb.connect(this.street).connect(this.master);
-    this.inside = G(state.ambience * 0.5); this.inside.connect(this.master);
-    this.sfx = G(CFG.audio.sfxVolume); this.sfx.connect(this.master);
+    this.street.connect(G(0.12)).connect(this.roomVerb);
+    this.inside = G(state.ambience * 0.5); this.inside.connect(this.master); this.inside.connect(G(0.3)).connect(this.roomVerb);
+    this.sfx = G(CFG.audio.sfxVolume); this.sfx.connect(this.master); this.sfx.connect(G(0.28)).connect(this.roomVerb);
+    // телевизор — точечный источник впереди; когда садимся — он ближе
     this.tv = G(state.tvVolume);
     const hp = this.f('highpass', 160), lp = this.f('lowpass', 6500);
-    this.tv.connect(hp).connect(lp).connect(this.master);
+    this.tvPan = this.panner('room', 0, { fixed: true }); this.setPos(this.tvPan, ...this.tvPos(Camera.seated));
+    this.tv.connect(hp).connect(lp).connect(this.tvPan).connect(this.master);
+    lp.connect(G(0.22)).connect(this.roomVerb);
 
     this.events = G(1); this.events.connect(this.amb);          // улица: сирена, собаки, дверь в подъезде
     this.home = G(1); this.home.connect(this.inside);            // квартира: кухня, часы
@@ -1593,8 +1615,77 @@ const Sound = {
   g(v = 0) { const n = this.ctx.createGain(); n.gain.value = v; return n; },
   f(type, freq, q = 0.707) { const b = this.ctx.createBiquadFilter(); b.type = type; b.frequency.value = freq; b.Q.value = q; return b; },
   o(type, freq) { const o = this.ctx.createOscillator(); o.type = type; o.frequency.value = freq; return o; },
-  p(v) { if (!this.ctx.createStereoPanner) return this.g(1); const n = this.ctx.createStereoPanner(); n.pan.value = clamp(v, -1, 1); return n; },
-  out(node, dest, pan) { if (pan == null) { node.connect(dest); return; } const p = this.p(pan); node.connect(p).connect(dest); },
+  /* ---------- пространство ----------
+     pan (−1…1, как раньше) превращается в точку вокруг слушателя. Где звук — решает,
+     куда он идёт: улица — справа за окном и ниже, кухня — сзади слева, комната — впереди. */
+  where(dest) {
+    if (dest === this.home) return 'kitchen';
+    if (dest === this.events || dest === this.amb || Object.values(this.buses).includes(dest)) return 'street';
+    return 'room';
+  },
+  spot(where, v) {
+    v = clamp(v, -1, 1);
+    const P = (az, d, y) => { const a = az * Math.PI / 180; return [d * Math.sin(a), y, -d * Math.cos(a)]; };
+    if (where === 'street') return P(30 + 55 * (v + 1) / 2, 7, -1.2);          // двор под окном: от «впереди справа» до «справа»
+    if (where === 'kitchen') return P(-125 + 15 * v, 5, 0);                    // по коридору, через стену
+    return P(v * 60, 2.6, 0.2);                                                 // предметы в комнате
+  },
+  tvPos(seated) { return seated ? [0, 0.05, -1.15] : [0, -0.15, -2.7]; },
+  panner(where, v, { fixed } = {}) {
+    const ctx = this.ctx;
+    if (!ctx.createPanner) return this.g(1);
+    const n = ctx.createPanner();
+    n.panningModel = this.hrtf ? 'HRTF' : 'equalpower';
+    n.distanceModel = 'inverse'; n.rolloffFactor = 1; n.maxDistance = 200;
+    const pos = this.spot(where, v);
+    n.refDistance = Math.hypot(...pos) || 1;                    // на своём месте громкость та же, что раньше
+    this.setPos(n, ...pos);
+    n._where = where;
+    // совместимость со старым кодом, который «ведёт» звук через pan.linearRampToValueAtTime
+    n.pan = {
+      setValueAtTime: (x, t) => this.setPos(n, ...this.spot(where, x), t),
+      linearRampToValueAtTime: (x, t) => this.rampPos(n, this.spot(where, x), t),
+    };
+    if (fixed) this.panners.add(n);
+    else { this.panners.add(n); setTimeout(() => this.panners.delete(n), 30000); }
+    return n;
+  },
+  setPos(n, x, y, z, t) {
+    if (n.positionX) { const at = t ?? this.ctx.currentTime; n.positionX.setValueAtTime(x, at); n.positionY.setValueAtTime(y, at); n.positionZ.setValueAtTime(z, at); }
+    else if (n.setPosition) n.setPosition(x, y, z);
+  },
+  rampPos(n, [x, y, z], t) {
+    if (n.positionX) { n.positionX.linearRampToValueAtTime(x, t); n.positionY.linearRampToValueAtTime(y, t); n.positionZ.linearRampToValueAtTime(z, t); }
+    else if (n.setPosition) setTimeout(() => n.setPosition(x, y, z), Math.max(0, (t - this.ctx.currentTime) * 1000));
+  },
+  /* наушники: HRTF (объём), колонки — обычная панорама */
+  setHeadphones(on) {
+    state.headphones = on; this.hrtf = on;
+    for (const n of this.panners) try { n.panningModel = on ? 'HRTF' : 'equalpower'; } catch (_) {}
+  },
+  /* сели к телевизору — звук ТВ приближается */
+  seat(on) {
+    if (!this.tvPan || !this.tvPan.positionX) return;
+    const t = this.ctx.currentTime, [x, y, z] = this.tvPos(on), d = CFG.seat.durationMs / 1000;
+    for (const [p, v] of [[this.tvPan.positionX, x], [this.tvPan.positionY, y], [this.tvPan.positionZ, z]]) { p.cancelScheduledValues(t); p.setValueAtTime(p.value, t); p.linearRampToValueAtTime(v, t + d); }
+  },
+  p(v, where = 'room') { return this.panner(where, v); },
+  out(node, dest, pan) { if (pan == null) { node.connect(dest); return; } const p = this.p(pan, this.where(dest)); node.connect(p).connect(dest); },
+  softCurve(k) { const n = 2048, c = new Float32Array(n); for (let i = 0; i < n; i++) { const x = i / (n - 1) * 2 - 1; c[i] = Math.tanh(k * x) / k; } return c; },
+  /* импульс маленькой комнаты: ранние отражения + тёплый короткий хвост */
+  makeRoomImpulse(sec) {
+    const ctx = this.ctx, sr = ctx.sampleRate, len = Math.floor(sec * sr), b = ctx.createBuffer(2, len, sr);
+    for (let ch = 0; ch < 2; ch++) {
+      const d = b.getChannelData(ch); let lp = 0;
+      for (let i = 0; i < len; i++) {
+        const t = i / sr, k = 0.18 + 0.75 * Math.min(1, t / 0.4);       // хвост всё темнее
+        lp += k * ((Math.random() * 2 - 1) - lp);
+        d[i] = lp * Math.exp(-t * 5.2) * (t < 0.006 ? t / 0.006 : 1);
+      }
+      for (const [ms, a] of [[7, 0.5], [11, 0.35], [17, 0.3], [23, 0.22], [31, 0.16]]) { const i = Math.floor((ms + ch * 1.3) / 1000 * sr); d[i] += a * (ch ? -1 : 1); }
+    }
+    return b;
+  },
   noise(kind = 'white', loop = true) { const s = this.ctx.createBufferSource(); s.buffer = this.buf[kind]; s.loop = loop; s.loopStart = 0; if (loop) s.playbackRate.value = 1; return s; },
   makeNoise(kind, sec = 4) {
     const ctx = this.ctx, len = sec * ctx.sampleRate, b = ctx.createBuffer(2, len, ctx.sampleRate);
@@ -1719,6 +1810,7 @@ const Sound = {
     if (this.master) this.master.gain.setTargetAtTime(m ? 0 : CFG.audio.master, this.ctx.currentTime, 0.06);
     for (const ch of CFG.channels) if (ch._video && !ch._src) ch._video.muted = m;
     Embed.syncVolume();
+    Radio.syncMute();
   },
   setAmbience(v) { state.ambience = v; this.applyVent(); },
   /* форточка: улица и события тише/громче, тон комнаты не меняется */
@@ -1766,7 +1858,13 @@ const Sound = {
   },
   noiseBed(bus, kind, type, f, vol, pan, q = 0.707) {
     const n = this.noise(kind), fl = this.f(type, f, q), gn = this.g(vol);
-    n.connect(fl).connect(gn); this.out(gn, bus, pan); n.start(0, Math.random() * 3);
+    n.connect(fl).connect(gn); n.start(0, Math.random() * 3);
+    if (pan == null || !this.ctx.createPanner) this.out(gn, bus, pan);
+    else {                                                   // широкий фон: левый и правый канал шума — две точки по краям окна
+      const sp = this.ctx.createChannelSplitter(2), w = this.where(bus);
+      gn.connect(sp);
+      for (const [ch, dv] of [[0, -0.45], [1, 0.45]]) { const pn = this.panner(w, pan + dv, { fixed: true }); sp.connect(pn, ch).connect(bus); }
+    }
     return { stop: at => { gn.gain.setTargetAtTime(0, at, 0.3); n.stop(at + 2); } };
   },
   startGroup(key) {
@@ -1846,7 +1944,7 @@ const Sound = {
       const tt = t + i * rand(0.05, 0.25), dur = rand(0.35, 0.7);
       const o = this.o('sawtooth', 6200), fm = this.o('sine', rand(28, 40)), fg = this.g(rand(600, 900));
       fm.connect(fg).connect(o.frequency);
-      const bp = this.f('bandpass', 6800, 3), gn = this.g(0), pn = this.p(-dir);
+      const bp = this.f('bandpass', 6800, 3), gn = this.g(0), pn = this.p(-dir, 'street');
       o.connect(bp).connect(gn).connect(pn).connect(bus);
       if (pn.pan) { pn.pan.setValueAtTime(clamp(-dir * 0.8 + 0.2, -1, 1), tt); pn.pan.linearRampToValueAtTime(clamp(dir * 0.8 + 0.2, -1, 1), tt + dur); }
       o.frequency.setValueAtTime(rand(5800, 6600), tt); o.frequency.linearRampToValueAtTime(rand(7000, 7800), tt + dur * 0.4); o.frequency.linearRampToValueAtTime(rand(6000, 6600), tt + dur);
@@ -1962,12 +2060,12 @@ const Sound = {
   throughWall(pan = -0.55, cutoff = 1700, dest = this.events) {
     if (!this._kitchen) {
       this._kitchen = this.ctx.createConvolver(); this._kitchen.buffer = this.makeImpulse(0.7, 4.5);
-      const kp = this.p(pan); this._kitchen.connect(kp).connect(dest);
+      const kp = this.p(pan, 'kitchen'); this._kitchen.connect(kp).connect(dest);
     }
     const inp = this.g(1), hp = this.f('highpass', 140), w1 = this.f('lowpass', cutoff, 0.6), w2 = this.f('lowpass', cutoff * 1.4, 0.5), body = this.f('peaking', 380, 0.9);
     body.gain.value = 4;
     inp.connect(hp).connect(w1).connect(w2).connect(body);
-    const pn = this.p(pan); body.connect(pn).connect(dest);
+    const pn = this.p(pan, 'kitchen'); body.connect(pn).connect(dest);
     const room = this.g(0.55); body.connect(room).connect(this._kitchen);
     return { inp, done: () => { inp.disconnect(); body.disconnect(); room.disconnect(); } };
   },
@@ -1986,7 +2084,7 @@ const Sound = {
     body.gain.value = 4;
     const hp = this.f('highpass', 140);
     out.connect(hp).connect(wall1).connect(wall2).connect(body);
-    const pn = this.p(-0.55); body.connect(pn).connect(this.events);
+    const pn = this.p(-0.55, 'kitchen'); body.connect(pn).connect(this.home);
     const room = this.g(0.55); body.connect(room).connect(this._kitchen).connect(pn);
     out.gain.setValueAtTime(0, t); out.gain.linearRampToValueAtTime(0.75, t + 2.2);
     out.gain.setValueAtTime(0.75, t + dur - 3); out.gain.linearRampToValueAtTime(0, t + dur);
@@ -2019,8 +2117,9 @@ const Sound = {
   siren(t) {
     const sb = this.fileBuf('siren'), fileT = sb ? sb.duration : null;
     const T = fileT || 11;
-    const pn = this.p(-1);
-    if (pn.pan) { pn.pan.setValueAtTime(-1, t); pn.pan.linearRampToValueAtTime(1, t + T); }
+    const pn = this.p(-1, 'street');
+    if (pn.positionX) { this.setPos(pn, 3, -4, -40, t); this.rampPos(pn, [8, -4, 2], t + T * 0.5); this.rampPos(pn, [14, -4, 40], t + T); pn.refDistance = 9; }
+    else if (pn.pan) { pn.pan.setValueAtTime(-1, t); pn.pan.linearRampToValueAtTime(1, t + T); }
     const glass = this.f('lowpass', 3800);
     glass.connect(pn).connect(this.events); glass.connect(this.verb);
     const N = 256, prox = new Float32Array(N), dop = new Float32Array(N);
@@ -2421,6 +2520,7 @@ const Zones = {
       { id: 'lamp', cls: 'lamp', pad: 0.05, label: () => T.lamp[nextIn(CFG.timeCycle, state.mode)] },
       { id: 'window', cls: 'window', pad: 0, label: () => T.weatherNext[nextIn(CFG.weatherCycle, state.weather)] },
       { id: 'drape', cls: 'drape', pad: 0, label: () => T.drape[Vent.index()] },
+      ...(CFG.radio ? [{ id: 'radio', cls: 'radio', pad: 0.04, label: () => Radio.label() }] : []),
       ...CFG.eggs.map(e => ({ id: e.id, cls: 'egg' + (e.eveningOnly ? ' evening-only' : ''), pad: 0.22, label: () => e.label, egg: e })),
     ];
   },
@@ -2471,6 +2571,7 @@ const Zones = {
     el.addEventListener('focus', () => { this.showCaption(el); if (d.egg) Puppets.hover(d.id, true); });
     el.addEventListener('blur', () => { this.hideCaption(); if (d.egg) Puppets.hover(d.id, false); });
     if (d.id === 'volumeKnob') return this.bindVolume(el);
+    if (d.id === 'radio') el.addEventListener('wheel', e => { e.preventDefault(); Radio.setVolume(state.radioVolume + (e.deltaY < 0 ? 0.05 : -0.05)); }, { passive: false });
     if (d.id === 'drape') el.addEventListener('wheel', e => { e.preventDefault(); Sound.start(); Vent.set(state.vent + (e.deltaY < 0 ? 0.04 : -0.04), true); this.showCaption(el); }, { passive: false });
     if (d.id === 'channelKnob') {
       el.addEventListener('wheel', e => {
@@ -2507,6 +2608,8 @@ const Zones = {
       setWeather(nextIn(CFG.weatherCycle, state.weather));
       UI.toast(T.weatherNow[state.weather], 2600);
       if (HOVER && el.matches(':hover')) this.showCaption(el);
+    } else if (d.id === 'radio') {
+      Radio.click();
     } else if (d.egg) {
       this.playEgg(d.egg, el);
     }
@@ -3029,6 +3132,302 @@ void main(){
   },
 };
 
+/* ==========================================================================
+   7c. РАДИОТОЧКА
+   Трёхпрограммный громкоговоритель стоит на телевизоре слева. Нарисован кодом
+   (корпус, ткань, клавиши, ручка) и освещается так же, как комната в каждой сцене.
+   Звук — записи старых передач из Internet Archive, через «проводной» фильтр,
+   в объёме: из угла ниши, с отзвуком комнаты.
+   ========================================================================== */
+const Radio = {
+  prog: -1, light: null, lightTo: null, lightT0: 0,
+  // освещение ниши в каждой сцене: цвет света и откуда он (−1 слева … +1 справа)
+  LIGHT: {
+    day:      { c: [0.53, 0.46, 0.37], dir: 0.55 },
+    sunset:   { c: [0.50, 0.35, 0.25], dir: 0.8 },
+    evening:  { c: [0.40, 0.27, 0.15], dir: -0.9 },
+    overcast: { c: [0.29, 0.28, 0.29], dir: 0.3 },
+    storm:    { c: [0.19, 0.19, 0.21], dir: 0.3 },
+  },
+  init() {
+    const R = CFG.radio; if (!R) return;
+    const [x, y, w, h] = R.box, m = { l: 14, t: 14, r: 12, b: 8 };
+    this.geo = { x: x - m.l, y: y - m.t, w: w + m.l + m.r, h: h + m.t + m.b, m, bw: w, bh: h };
+    const el = this.el = document.createElement('div'); el.className = 'radio-pt';
+    Object.assign(el.style, { left: this.geo.x / IMG_W * 100 + '%', top: this.geo.y / IMG_H * 100 + '%', width: this.geo.w / IMG_W * 100 + '%', height: this.geo.h / IMG_H * 100 + '%' });
+    el.innerHTML = '<canvas></canvas><i class="radio-glow"></i>';
+    stageEl.insertBefore(el, $('#glow'));                 // под слоями света: его тоже освещает экран, мигалка, вспышка
+    this.cv = el.querySelector('canvas'); this.g = this.cv.getContext('2d');
+    this.light = this.sceneLight(state.scene);
+    this.resize();
+    addEventListener('resize', () => this.resize());
+  },
+  sceneLight(scene) { const L = this.LIGHT[scene] || this.LIGHT.day; return { c: L.c.slice(), dir: L.dir }; },
+  setScene(scene) {
+    if (!this.el) return;
+    this.lightFrom = { c: this.light.c.slice(), dir: this.light.dir }; this.lightTo = this.sceneLight(scene); this.lightT0 = nowMs();
+  },
+  resize() {
+    if (!this.cv) return;
+    const k = Math.min(4, state.stage.u * (devicePixelRatio || 1) * (Camera.seated ? state.zoom || 1 : 1));
+    const W = Math.round(this.geo.w * k), H = Math.round(this.geo.h * k);
+    if (this.cv.width !== W || this.cv.height !== H) { this.cv.width = W; this.cv.height = H; }
+    this.k = k; this.draw();
+  },
+  update(t) {
+    if (!this.lightTo) return;
+    const e = smooth(0, 1, clamp((t - this.lightT0) / CFG.crossfadeMs, 0, 1));
+    this.light = { c: this.lightFrom.c.map((v, i) => lerp(v, this.lightTo.c[i], e)), dir: lerp(this.lightFrom.dir, this.lightTo.dir, e) };
+    this.draw();
+    if (e >= 1) this.lightTo = null;
+  },
+
+  /* ---------- рисунок ---------- */
+  draw() {
+    const g = this.g, k = this.k, G = this.geo, L = this.light; if (!g || !k) return;
+    g.setTransform(1, 0, 0, 1, 0, 0); g.clearRect(0, 0, this.cv.width, this.cv.height);
+    g.setTransform(k, 0, 0, k, G.m.l * k, G.m.t * k);           // единицы — пиксели картинки, (0,0) — левый верх передней панели
+    const W = G.bw, H = G.bh, top = 6, side = 3;              // видно чуть сверху и чуть справа
+    const lum = (L.c[0] * 0.3 + L.c[1] * 0.59 + L.c[2] * 0.11);
+    const lit = (rgb, s = 1) => `rgb(${rgb.map((v, i) => clamp(Math.round(v * L.c[i] * s), 0, 255)).join(',')})`;
+    const rr = (x, y, w, h, r) => { g.beginPath(); g.moveTo(x + r, y); g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r); g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath(); };
+    const on = this.prog >= 0;
+
+    // тени: на заднюю стенку ниши (от света сбоку) и под корпусом на крышку телевизора
+    g.save();
+    g.shadowColor = `rgba(8,4,2,${0.55 - 0.15 * Math.abs(L.dir)})`; g.shadowBlur = 9 * k; g.shadowOffsetX = -L.dir * 7 * k; g.shadowOffsetY = -2 * k;
+    g.fillStyle = 'rgba(0,0,0,1)'; rr(2, 2, W - 4, H - 6, 4); g.fill();
+    g.restore();
+    g.clearRect(-1, -top - 1, W + side + 2, H + top + 2);       // сама коробка закроет это место
+    g.save(); g.globalAlpha = 0.6;
+    const cs = g.createRadialGradient(W / 2, H, 2, W / 2, H, W * 0.62);
+    cs.addColorStop(0, 'rgba(10,5,2,.85)'); cs.addColorStop(1, 'rgba(10,5,2,0)');
+    g.fillStyle = cs; g.scale(1, 0.12); g.fillRect(-12, (H - 30) / 0.12, W + 24, 60 / 0.12); g.restore();
+
+    // провод: из-за корпуса вниз, за телевизор
+    g.save(); g.strokeStyle = lit([60, 52, 46]); g.lineWidth = 1.5; g.lineCap = 'round';
+    g.beginPath(); g.moveTo(2, H - 10); g.bezierCurveTo(-6, H - 6, -8, H + 2, -12, H + 6); g.stroke(); g.restore();
+
+    const IVORY = [232, 220, 192], IVORY_D = [196, 182, 152];
+    // правый бок (виден чуть-чуть)
+    g.fillStyle = lit(IVORY_D, 0.72 + 0.2 * Math.max(0, L.dir));
+    g.beginPath(); g.moveTo(W - 1, 3); g.lineTo(W + side, -top + 3); g.lineTo(W + side, H - top + 1); g.lineTo(W - 1, H - 1); g.closePath(); g.fill();
+    // крышка
+    g.fillStyle = lit(IVORY, 1.06);
+    g.beginPath(); g.moveTo(3, 0); g.lineTo(W - 3, 0); g.lineTo(W + side - 2, -top); g.lineTo(side + 2, -top); g.closePath(); g.fill();
+    // клавиши программ на крышке (справа); нажатая — ниже и темнее
+    for (let i = 0; i < 3; i++) {
+      const kx = W - 34 + i * 10 + side * 0.4, down = on && this.prog === i;
+      const ky = -top + 1.5, kh = top - 2.5, rise = down ? 0.4 : 2;
+      g.fillStyle = lit([214, 204, 182], down ? 0.7 : 1.0); g.fillRect(kx, ky - rise, 8, kh + rise * 0.4);
+      g.fillStyle = lit([250, 244, 228], down ? 0.75 : 1.12); g.fillRect(kx, ky - rise, 8, 1.4);
+      g.fillStyle = 'rgba(40,25,10,.35)'; g.fillRect(kx, ky - rise + kh + rise * 0.4, 8, 0.8);
+    }
+    // передняя панель
+    const body = g.createLinearGradient(0, 0, 0, H);
+    body.addColorStop(0, lit(IVORY, 1.02)); body.addColorStop(0.55, lit(IVORY, 0.93)); body.addColorStop(1, lit(IVORY_D, 0.78));
+    g.fillStyle = body; rr(0, 0, W, H, 4.5); g.fill();
+    // ткань громкоговорителя
+    const gx = 5, gy = 5, gw = W * 0.64, gh = H - 13;
+    g.save(); rr(gx, gy, gw, gh, 3); g.clip();
+    g.fillStyle = lit([150, 116, 78]); g.fillRect(gx, gy, gw, gh);
+    g.globalAlpha = 0.5; g.lineWidth = 0.35;
+    for (let yy = gy; yy < gy + gh; yy += 0.9) { g.strokeStyle = lit((yy * 7 | 0) % 2 ? [176, 140, 98] : [120, 90, 60]); g.beginPath(); g.moveTo(gx, yy); g.lineTo(gx + gw, yy); g.stroke(); }
+    g.globalAlpha = 0.28;
+    for (let xx = gx; xx < gx + gw; xx += 0.9) { g.strokeStyle = lit([96, 72, 46]); g.beginPath(); g.moveTo(xx, gy); g.lineTo(xx, gy + gh); g.stroke(); }
+    g.globalAlpha = 1;
+    // вертикальные планки поверх ткани
+    for (let i = 1; i < 9; i++) { const xx = gx + gw * i / 9; g.fillStyle = lit([196, 180, 148], 0.9); g.fillRect(xx - 0.55, gy, 1.1, gh); g.fillStyle = 'rgba(30,18,8,.28)'; g.fillRect(xx + 0.55, gy, 0.5, gh); }
+    const vg = g.createRadialGradient(gx + gw / 2, gy + gh / 2, gh * 0.2, gx + gw / 2, gy + gh / 2, gw * 0.7);
+    vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(20,10,4,.45)'); g.fillStyle = vg; g.fillRect(gx, gy, gw, gh);
+    g.restore();
+    g.strokeStyle = 'rgba(40,24,10,.5)'; g.lineWidth = 0.8; rr(gx, gy, gw, gh, 3); g.stroke();
+    // латунная полоска под тканью
+    const brass = g.createLinearGradient(gx, 0, gx + gw, 0);
+    brass.addColorStop(0, lit([150, 112, 50])); brass.addColorStop(0.5, lit([236, 196, 110], 1.1)); brass.addColorStop(1, lit([150, 112, 50]));
+    g.fillStyle = brass; g.fillRect(gx, gy + gh + 2.2, gw, 1.6);
+    // шкала программ
+    const dx = gx + gw + 5, dw = W - dx - 5, dy = 6, dh = 17;
+    g.fillStyle = on ? '#1b0f05' : lit([40, 34, 30]); rr(dx, dy, dw, dh, 2); g.fill();
+    if (on) {
+      const amb = g.createRadialGradient(dx + dw / 2, dy + dh / 2, 1, dx + dw / 2, dy + dh / 2, dw * 0.8);
+      amb.addColorStop(0, 'rgba(255,190,90,.95)'); amb.addColorStop(1, 'rgba(200,90,20,.55)');
+      g.fillStyle = amb; rr(dx + 0.8, dy + 0.8, dw - 1.6, dh - 1.6, 1.5); g.fill();
+    }
+    g.font = `bold 5.2px "Neucha", "Arial Narrow", sans-serif`; g.textAlign = 'center'; g.textBaseline = 'middle';
+    for (let i = 0; i < 3; i++) {
+      const cx = dx + dw * (i + 0.5) / 3;
+      g.fillStyle = on ? (this.prog === i ? '#3a1504' : 'rgba(70,30,6,.55)') : lit([150, 140, 120]);
+      g.fillText(['1', '2', '3'][i], cx, dy + dh * 0.42);
+      if (on && this.prog === i) { g.fillStyle = '#c42a10'; g.fillRect(cx - 2.2, dy + dh - 4.4, 4.4, 1.6); }
+    }
+    // стекло шкалы
+    const gl = g.createLinearGradient(dx, dy, dx, dy + dh); gl.addColorStop(0, `rgba(255,255,255,${0.22 * lum + 0.04})`); gl.addColorStop(0.45, 'rgba(255,255,255,0)');
+    g.fillStyle = gl; rr(dx, dy, dw, dh, 2); g.fill();
+    // ручка громкости
+    const kx = dx + dw / 2, ky = H - 20, kr = 8.2;
+    g.save();
+    g.shadowColor = 'rgba(20,10,4,.55)'; g.shadowBlur = 3 * k; g.shadowOffsetX = -L.dir * 1.6 * k; g.shadowOffsetY = 1.2 * k;
+    g.fillStyle = lit([190, 176, 150]); g.beginPath(); g.arc(kx, ky, kr, 0, Math.PI * 2); g.fill(); g.restore();
+    for (let i = 0; i < 28; i++) { const a = i / 28 * Math.PI * 2; g.strokeStyle = i % 2 ? lit([150, 136, 112]) : lit([222, 210, 186]); g.lineWidth = 0.7; g.beginPath(); g.moveTo(kx + Math.cos(a) * (kr - 1.3), ky + Math.sin(a) * (kr - 1.3)); g.lineTo(kx + Math.cos(a) * kr, ky + Math.sin(a) * kr); g.stroke(); }
+    const kg = g.createRadialGradient(kx + L.dir * -2.5, ky - 3, 0.5, kx, ky, kr * 0.9);
+    kg.addColorStop(0, lit([252, 246, 230], 1.15)); kg.addColorStop(1, lit([200, 186, 160], 0.9));
+    g.fillStyle = kg; g.beginPath(); g.arc(kx, ky, kr - 1.6, 0, Math.PI * 2); g.fill();
+    const va = (-135 + 270 * state.radioVolume) * Math.PI / 180;
+    g.strokeStyle = lit([80, 60, 40]); g.lineWidth = 1.1; g.lineCap = 'round';
+    g.beginPath(); g.moveTo(kx + Math.sin(va) * 1.5, ky - Math.cos(va) * 1.5); g.lineTo(kx + Math.sin(va) * (kr - 2.6), ky - Math.cos(va) * (kr - 2.6)); g.stroke();
+    // свет сбоку: одна сторона ярче, блик по ребру
+    g.save(); rr(0, 0, W, H, 4.5); g.clip();
+    const side1 = g.createLinearGradient(0, 0, W, 0), a1 = 0.16 * lum / 0.5;
+    side1.addColorStop(0, L.dir < 0 ? `rgba(255,236,200,${a1})` : `rgba(0,0,0,${a1 * 0.9})`);
+    side1.addColorStop(0.5, 'rgba(0,0,0,0)');
+    side1.addColorStop(1, L.dir > 0 ? `rgba(255,236,200,${a1})` : `rgba(0,0,0,${a1 * 0.9})`);
+    g.globalCompositeOperation = 'soft-light'; g.fillStyle = side1; g.fillRect(0, 0, W, H);
+    g.restore();
+    g.strokeStyle = `rgba(255,248,230,${0.18 + 0.4 * lum})`; g.lineWidth = 0.7;
+    g.beginPath(); g.moveTo(4, 0.5); g.lineTo(W - 4, 0.5); g.stroke();
+    g.strokeStyle = 'rgba(30,18,8,.4)'; g.beginPath(); g.moveTo(4, H - 0.4); g.lineTo(W - 4, H - 0.4); g.stroke();
+    // ножки
+    g.fillStyle = 'rgba(18,10,5,.9)'; g.fillRect(8, H - 0.5, 9, 1.6); g.fillRect(W - 17, H - 0.5, 9, 1.6);
+    // зерно и лёгкая потёртость пластика — как у всего на фотографии
+    if (!this.noise) {
+      const n = document.createElement('canvas'); n.width = n.height = 96; const ng = n.getContext('2d'), id = ng.createImageData(96, 96);
+      for (let i = 0; i < id.data.length; i += 4) { const v = 128 + (Math.random() - 0.5) * 120; id.data[i] = id.data[i + 1] = id.data[i + 2] = v; id.data[i + 3] = 255; }
+      ng.putImageData(id, 0, 0); this.noise = n;
+    }
+    g.save(); g.globalCompositeOperation = 'source-atop'; g.globalAlpha = 0.09;   // только поверх уже нарисованного
+    g.setTransform(1, 0, 0, 1, 0, 0); g.fillStyle = g.createPattern(this.noise, 'repeat');
+    g.beginPath(); g.rect(0, 0, this.cv.width, this.cv.height); g.fill();
+    g.restore();
+  },
+
+  /* ---------- звук ---------- */
+  label() {
+    const T = CFG.text;
+    if (this.prog < 0) return T.radioOff;
+    const now = CFG.radio.programs[this.prog].name + (this.title ? ' — ' + this.title : '') + (this.loading ? ', ' + T.radioTuning : '');
+    return (this.prog === CFG.radio.programs.length - 1 ? T.radioLast : T.radioNext).replace('{now}', now);
+  },
+  async click() {
+    await Sound.start();
+    const n = CFG.radio.programs.length;
+    this.select(this.prog + 1 >= n ? -1 : this.prog + 1);
+  },
+  key() {                                          // щелчок клавиши
+    if (!Sound.started) return;
+    const t = Sound.ctx.currentTime + 0.01, pan = -0.25;
+    Sound.burst(t, { dur: 0.03, vol: 0.22, type: 'bandpass', f: 1700, q: 1.4, pan });
+    Sound.burst(t + 0.045, { dur: 0.02, vol: 0.12, type: 'bandpass', f: 2600, q: 2, pan });
+    Sound.tone(t, { f: 180, f2: 90, dur: 0.06, vol: 0.06, pan });
+  },
+  chain() {                                       // «проводной» звук: узкая полоса, маленький динамик, лёгкий перегруз
+    if (this._chain || !Sound.started) return this._chain;
+    const S = Sound, ctx = S.ctx;
+    const inp = S.g(1), hp = S.f('highpass', 170, 0.8), lp = S.f('lowpass', 5200, 0.7), box = S.f('peaking', 950, 1.1), low = S.f('peaking', 260, 1.2);
+    box.gain.value = 4; low.gain.value = 2.5;
+    const sat = ctx.createWaveShaper(); sat.curve = S.softCurve(1.8); sat.oversample = '2x';
+    const vol = S.g(state.radioVolume * 1.15), pan = S.panner('room', 0, { fixed: true });
+    S.setPos(pan, -0.55, 0.32, -2.6);                     // ниша: чуть левее и выше телевизора
+    pan.refDistance = 2.7;
+    inp.connect(hp).connect(low).connect(box).connect(lp).connect(sat).connect(vol).connect(pan).connect(S.master);
+    vol.connect(S.g(0.38)).connect(S.roomVerb);
+    // тихий фон трансляционной сети: 50 Гц и чуть-чуть шипения
+    const hum = S.o('sine', 50), hg = S.g(0); hum.connect(hg).connect(inp); hum.start();
+    const hiss = S.noise('pink'), hf = S.f('bandpass', 3000, 0.6), hs = S.g(0); hiss.connect(hf).connect(hs).connect(inp); hiss.start(0, Math.random() * 3);
+    return (this._chain = { inp, vol, hg, hs });
+  },
+  bed(on) {
+    const c = this.chain(); if (!c) return;
+    const t = Sound.ctx.currentTime;
+    c.hg.gain.setTargetAtTime(on ? 0.006 : 0, t, 0.08); c.hs.gain.setTargetAtTime(on ? 0.012 : 0, t, 0.08);
+  },
+  setVolume(v) {
+    state.radioVolume = clamp(v, 0, 1);
+    try { localStorage.setItem('tubetv.radio', String(state.radioVolume)); } catch (_) {}
+    if (this._chain) this._chain.vol.gain.setTargetAtTime(state.radioVolume * 1.15, Sound.ctx.currentTime, 0.05);
+    if (this.plain) this.plain.volume = state.muted ? 0 : state.radioVolume;
+    const mx = $('#mxRadio'); if (mx && +mx.value !== state.radioVolume) mx.value = state.radioVolume;
+    this.draw();
+  },
+  syncMute() { if (this.plain) this.plain.volume = state.muted ? 0 : state.radioVolume; },
+  /* Аудиоэлемент. Сначала — с CORS (тогда звук идёт через фильтр и объём);
+     если архив не разрешит — обычный элемент без обработки. */
+  audio() {
+    if (this.au) return this.au;
+    const a = new Audio(); a.preload = 'none';
+    if (!this.noCors) {
+      a.crossOrigin = 'anonymous';
+      try { const src = Sound.ctx.createMediaElementSource(a); src.connect(this.chain().inp); this.routed = true; }
+      catch (_) { this.routed = false; }
+    }
+    a.addEventListener('ended', () => this.next(true));
+    a.addEventListener('playing', () => { this.loading = false; this.fails = 0; this.refresh(); });
+    a.addEventListener('waiting', () => { this.loading = true; this.refresh(); });
+    a.addEventListener('error', () => this.onError());
+    this.au = a; this.plain = this.routed ? null : a;
+    this.syncMute();
+    return a;
+  },
+  onError() {
+    if (this.prog < 0) return;
+    this.fails = (this.fails || 0) + 1;
+    if (this.routed && !this.noCors && this.fails >= 1 && !this.triedPlain) {
+      // скорее всего, сервер не прислал CORS — переходим на простой элемент
+      this.triedPlain = true; this.noCors = true;
+      try { this.au.pause(); this.au.removeAttribute('src'); this.au.load(); } catch (_) {}
+      this.au = null; this.routed = false;
+      return this.next(false);
+    }
+    if (this.fails < 4) return setTimeout(() => this.prog >= 0 && this.next(false), 600);
+    this.loading = false; this.refresh();
+    UI.toast(CFG.text.radioFail, 4000);
+  },
+  select(i) {
+    this.key();
+    const prev = this.prog; this.prog = i;
+    this.draw(); this.el && this.el.classList.toggle('on', i >= 0);
+    document.body.classList.toggle('radio-on', i >= 0);
+    if (i < 0) {
+      this.title = ''; this.loading = false;
+      if (this.au) { const a = this.au; this.fade(0, 0.25); setTimeout(() => { if (this.prog < 0) a.pause(); }, 400); }
+      this.bed(false); this.refresh();
+      return;
+    }
+    this.bed(true);
+    this.next(false, prev);
+  },
+  fade(to, sec) {
+    if (this._chain) this._chain.vol.gain.setTargetAtTime(to * state.radioVolume * 1.15, Sound.ctx.currentTime, sec / 3);
+  },
+  next(sequential) {
+    const P = CFG.radio.programs[this.prog]; if (!P) return;
+    let idx;
+    if (sequential && this.idx != null) idx = (this.idx + 1) % P.items.length;
+    else { idx = irand(0, P.items.length - 1); if (P.items.length > 1 && idx === this.idx && this.lastProg === this.prog) idx = (idx + 1) % P.items.length; }
+    this.idx = idx; this.lastProg = this.prog;
+    const it = P.items[idx], a = this.audio(), url = CFG.radio.base + it.u.split('/').map(encodeURIComponent).join('/');
+    this.title = it.t; this.loading = true; this.refresh();
+    this.fade(0, 0.05);
+    a.src = url;
+    const seekRandom = !sequential;
+    const onMeta = () => {
+      a.removeEventListener('loadedmetadata', onMeta);
+      if (seekRandom && isFinite(a.duration) && a.duration > 240) {
+        const span = a.duration - 120;
+        try { a.currentTime = (it.long ? rand(0.05, 0.92) : rand(0, 0.6)) * span; } catch (_) {}
+      }
+    };
+    a.addEventListener('loadedmetadata', onMeta);
+    const p = a.play(); if (p && p.catch) p.catch(() => {});
+    setTimeout(() => this.fade(1, 0.6), 250);
+  },
+  refresh() {
+    const z = Zones.els && Zones.els.radio; if (!z) return;
+    z.setAttribute('aria-label', this.label());
+    if (HOVER && z.matches(':hover')) Zones.showCaption(z);
+  },
+};
+
 /* ---------- микро-эффекты ---------- */
 const FX = {
   wrap: $('#fx'),
@@ -3124,8 +3523,19 @@ const UI = {
     const intro = $('#intro'); intro.textContent = T.intro;
     setTimeout(() => intro.classList.add('show'), 700);
     $('#powerHint .bubble').textContent = T.powerHint;
-    const tv = $('#mxTv'), room = $('#mxRoom');
+    const tv = $('#mxTv'), room = $('#mxRoom'), radio = $('#mxRadio');
     tv.value = state.tvVolume; room.value = state.ambience;
+    if (radio) { radio.value = state.radioVolume; radio.addEventListener('input', () => { Sound.start(); Radio.setVolume(+radio.value); }); }
+    const ph = $('#phonesBtn');
+    if (ph) {
+      const sync = () => { ph.setAttribute('aria-pressed', String(state.headphones)); ph.classList.toggle('on', state.headphones); ph.title = state.headphones ? T.phonesOn : T.phonesOff; };
+      sync();
+      ph.addEventListener('click', async () => {
+        await Sound.start(); Sound.setHeadphones(!state.headphones); sync();
+        try { localStorage.setItem('tubetv.phones', state.headphones ? '1' : '0'); } catch (_) {}
+        this.toast(state.headphones ? T.phonesOn : T.phonesOff, 2200);
+      });
+    }
     tv.addEventListener('input', () => { Sound.start(); Sound.setTvVolume(+tv.value); TV.osdVolUntil = nowMs() + 1200; });
     room.addEventListener('input', () => { Sound.start(); Sound.setAmbience(+room.value); try { localStorage.setItem('tubetv.room', room.value); } catch (_) {} });
     const mute = $('#muteBtn');
@@ -3291,6 +3701,7 @@ function init() {
   Weather.init();
   Zones.init();
   Puppets.init();
+  Radio.init();
   UI.init();
   applyScene(true);
   layout();
@@ -3358,11 +3769,12 @@ function init() {
     Light.update(t);
     Dust.update(t, dt);
     Weather.update(t, dt);
+    Radio.update(t);
     requestAnimationFrame(frame);
   };
   requestAnimationFrame(frame);
 
-  window.TubeTV = { GLRoom, BG, TV, Sound, Events, setMode, setWeather, Calib, Puppets, Camera, Embed, Wind, Weather, state, CFG };   // для отладки из консоли
+  window.TubeTV = { GLRoom, BG, TV, Sound, Events, setMode, setWeather, Calib, Puppets, Camera, Embed, Wind, Weather, Radio, state, CFG };   // для отладки из консоли
 }
 
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();

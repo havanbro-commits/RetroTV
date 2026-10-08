@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Tube TV</title>
-  <!-- v0.5 -->
+  <!-- v0.7 -->
   <meta name="description" content="Комната середины 90-х: ламповый телевизор, июньский свет, жизнь квартиры вокруг.">
   <meta name="theme-color" content="#1a110a">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -66,7 +66,11 @@
       <div class="mixer" role="group" aria-label="Громкость">
         <label class="mx"><span>ТВ</span><input id="mxTv" type="range" min="0" max="1" step="0.01" aria-label="Громкость телевизора"></label>
         <label class="mx"><span>Комната</span><input id="mxRoom" type="range" min="0" max="1" step="0.01" aria-label="Громкость комнаты: улица, кухня, погода"></label>
+        <label class="mx"><span>Радио</span><input id="mxRadio" type="range" min="0" max="1" step="0.01" aria-label="Громкость радиоточки"></label>
       </div>
+      <button id="phonesBtn" class="phones" type="button" aria-pressed="true" aria-label="Объёмный звук для наушников">
+        <svg viewBox="0 0 24 24" width="21" height="21" aria-hidden="true"><path d="M4 15v-3a8 8 0 0 1 16 0v3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><rect x="3" y="14" width="4.5" height="6.5" rx="1.6" fill="currentColor"/><rect x="16.5" y="14" width="4.5" height="6.5" rx="1.6" fill="currentColor"/></svg>
+      </button>
       <button id="muteBtn" class="mute" type="button" aria-pressed="false" aria-label="Выключить звук">
         <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
           <path d="M4 9v6h4l5 4V5L8 9H4z" fill="currentColor"/>

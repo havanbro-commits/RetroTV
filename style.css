@@ -380,7 +380,7 @@ body.evening .hot.evening-only { pointer-events: auto; }
   top: max(14px, env(safe-area-inset-top)); right: max(14px, env(safe-area-inset-right));
   display: flex; align-items: center; gap: 10px;
 }
-.mute {
+.mute, .phones {
   width: 44px; height: 44px; border-radius: 50%;
   display: grid; place-items: center;
   color: var(--ink);
@@ -390,7 +390,10 @@ body.evening .hot.evening-only { pointer-events: auto; }
   cursor: pointer;
   transition: background .2s ease, transform .15s ease;
 }
-.mute:hover { background: rgba(40, 24, 14, .75); }
+.mute:hover, .phones:hover { background: rgba(40, 24, 14, .75); }
+.phones { opacity: .55; }
+.phones.on { opacity: 1; color: #f2c47e; border-color: rgba(255, 214, 160, .45); }
+.phones:focus-visible { outline: 2px solid rgba(255, 214, 160, .8); outline-offset: 2px; }
 .mute:active { transform: scale(.94); }
 .mute .cross { display: none; }
 .mute[aria-pressed="true"] .cross { display: inline; }
@@ -423,8 +426,9 @@ body.evening .hot.evening-only { pointer-events: auto; }
 @media (max-width: 760px) {
   .ui { flex-wrap: wrap; justify-content: flex-end; max-width: calc(100vw - 28px); }
   .mixer { order: 3; height: 38px; gap: 10px; padding: 0 12px; font-size: 14px; }
-  .mixer input { width: 70px; }
+  .mixer input { width: 58px; }
 }
+@media (max-width: 420px) { .mixer { gap: 7px; padding: 0 10px; font-size: 13px; } .mixer .mx { gap: 4px; } .mixer input { width: 48px; } }
 @media (max-width: 560px) { .seat .long { display: none; } .seat .short { display: inline; } }
 .vignette.focus {
   opacity: 0; transition: opacity 1.4s ease;
@@ -511,3 +515,15 @@ body.reduced .grain { display: none; }
   .power-hint .ring { animation-duration: 4s; }
   .power-hint .bubble { animation: none; opacity: 1; }
 }
+
+/* ---------- радиоточка ---------- */
+.radio-pt { position: absolute; pointer-events: none; }
+.radio-pt canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.radio-pt .radio-glow {
+  position: absolute; left: 56%; top: 6%; width: 30%; height: 42%; opacity: 0; pointer-events: none;
+  background: radial-gradient(ellipse closest-side, rgba(255, 170, 70, .42), rgba(255, 130, 40, .1) 60%, rgba(255, 120, 30, 0));
+  mix-blend-mode: screen; transition: opacity .6s ease;
+}
+.radio-pt.on .radio-glow { opacity: .55; }
+body.evening .radio-pt.on .radio-glow, body.weather-downpour .radio-pt.on .radio-glow { opacity: 1; }
+.hot.radio .halo { border-radius: 6px; }

@@ -99,6 +99,9 @@ window.TUBE_TV_CONFIG = {
     figurine:    { x: 64.58, y: 18.95, w: 3.45,  h: 9.86  },
     teapot:      { x: 19.66, y: 38.38, w: 5.60,  h: 8.01  },
     radio:       { x: 38.93, y: 25.39, w: 7.55,  h: 7.52  },
+    clock:       { x: 53.39, y: 24.61, w: 5.47,  h: 8.40  },
+    vcr:         { x: 42.64, y: 79.10, w: 12.37, h: 5.86  },
+    calendar:    { x: 56.12, y: 16.21, w: 3.39,  h: 7.03  },
   },
 
   /* «Сесть перед телевизором»: камера наезжает так, чтобы зона tvBody
@@ -154,8 +157,10 @@ window.TUBE_TV_CONFIG = {
       source: { channel: 'UCESmUzgr_rfY2VO44PRWqpg' } },   // «Старый телевизор (STAROETV.SU)»
     { type: 'youtube', label: 'АРХИВ', shuffle: true, randomStart: true,
       source: { channel: 'UC67zFUthMqRppJ7Z0ef-F4Q' } },   // «Старый Телевизор» — проверьте, что это нужный канал
-    { type: 'video', label: 'AV-1', order: 'shuffle', live: true,
-      playlist: ['assets/video/ch-01.mp4', 'assets/video/ch-02.mp4', 'assets/video/ch-03.mp4'] },
+    /* Видеомагнитофон: щёлкните по видику под телевизором — вставится кассета, и здесь пойдёт
+       запись (ролики с канала, «как с кассеты»: дрожание, полосы трекинга). Без кассеты — синий экран AV. */
+    { type: 'vcr', label: 'ВИДЕО', shuffle: true, randomStart: true,
+      source: { channel: 'UCESmUzgr_rfY2VO44PRWqpg' } },
   ],
 
   /* ---------- СВЕТ ---------- */
@@ -290,6 +295,17 @@ window.TUBE_TV_CONFIG = {
       ] },
     ],
     base: 'https://archive.org/download/',
+  },
+
+  /* ---------- ВИДЕОМАГНИТОФОН ---------- (метры: центр x, ширина w, высота h, расстояние до передней панели z, глубина d)
+     light — во сколько раз свет сцены у пола под телевизором (линейный, RGB) */
+  vcr: { x: -0.042, w: 0.43, h: 0.092, z: 3.62, d: 0.30,
+    light: { day: [0.5, 0.46, 0.4], evening: [0.16, 0.11, 0.06], overcast: [0.085, 0.09, 0.1], storm: [0.06, 0.068, 0.08] } },
+
+  /* ---------- БУДИЛЬНИК И КАЛЕНДАРЬ ---------- (box — пиксели картинки [x, y, w, h]) */
+  props: {
+    clock:    { box: [818, 250, 92, 90] },      // на телевизоре справа
+    calendar: { box: [858, 160, 58, 82] },      // на гвоздике в нише
   },
 
   /* ---------- ТЕКСТЫ ---------- */

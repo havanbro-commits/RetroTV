@@ -102,8 +102,8 @@ const Camera = {
     const w = CFG.zones.window, st = state.stage;
     this.winHidden = this.seated && (t.x + (w.x / 100) * st.w * t.k > innerWidth || t.y + ((w.y + w.h) / 100) * st.h * t.k < 0);
     clearTimeout(this._t);
-    if (animate) this._t = setTimeout(() => { stageEl.classList.remove('moving'); TV.resize(); Radio.resize(); }, CFG.seat.durationMs + 60);
-    else { TV.resize(); Radio.resize(); }
+    if (animate) this._t = setTimeout(() => { stageEl.classList.remove('moving'); TV.resize(); Radio.resize(); Props.resize(); VCR.resize(); }, CFG.seat.durationMs + 60);
+    else { TV.resize(); Radio.resize(); Props.clock && Props.resize(); VCR.cv && VCR.resize(); }
   },
   toggle(on = !this.seated) {
     if (on === this.seated) return;
@@ -195,7 +195,9 @@ bool roomPoint(vec2 p, float id, out vec3 P, out vec3 N){
   else if (id < 5.5) Z = 4.45;
   else if (id < 6.5) { Z = 3.75; N = vec3(0.0, 0.25, 0.968); }
   else if (id < 7.5) { Z = FOC * CAMH / max(p.y - CY, 0.5); N = vec3(0.0, 1.0, 0.0); }
-  else { Z = 2.6 - clamp((p.y - 690.0) / 334.0, 0.0, 1.0) * 1.1; N = vec3(0.123, 0.738, 0.663); }
+  else if (id < 8.5) { Z = 2.6 - clamp((p.y - 690.0) / 334.0, 0.0, 1.0) * 1.1; N = vec3(0.123, 0.738, 0.663); }
+  else if (id < 9.5) Z = ${f(CFG.vcr ? CFG.vcr.z : 3.62)};                                  // видик: передняя панель
+  else { Z = FOC * (CAMH - ${f(CFG.vcr ? CFG.vcr.h : 0.09)}) / max(p.y - CY, 0.5); N = vec3(0.0, 1.0, 0.0); }   // видик: крышка
   P = vec3((p.x - CX) / FOC * Z, -(p.y - CY) / FOC * Z, -Z);
   return true;
 }
@@ -300,7 +302,7 @@ void main(){
   float winM = smoothstep(uWin.x - 6.0, uWin.x + 10.0, p.x) * (1.0 - smoothstep(uWin.w - 10.0, uWin.w + 6.0, p.y));
   vec3 col = vec3(0.0);
   vec3 P, N;
-  bool room = roomPoint(p, floor(texture2D(uGeo, v).r * 255.0 / 30.0 + 0.5), P, N);
+  bool room = roomPoint(p, floor(texture2D(uGeo, v).r * 255.0 / 20.0 + 0.5), P, N);
   // ---- день и закат: снимаем «старое» солнце с фотографии и кладём рассчитанное ----
   if (uW.x > 0.001) {
     float Lold = sunAt(q);
@@ -355,7 +357,7 @@ ${this.glsl()}
 void main(){
   vec2 p = v * uImg;
   vec3 P, N;
-  float id = floor(texture2D(uGeo, v).r * 255.0 / 30.0 + 0.5);
+  float id = floor(texture2D(uGeo, v).r * 255.0 / 20.0 + 0.5);
   float Zs = 6.0;
   if (roomPoint(p, id, P, N)) Zs = min(-P.z, 6.0);
   vec3 d = vec3((p.x - CX) / FOC, -(p.y - CY) / FOC, -1.0);
@@ -437,13 +439,23 @@ void main(){
   loadUnit(k) {
     if (this.loading[k]) return this.loading[k];
     const gl = this.gl, i = this.units.indexOf(k), src = this.srcs[k];
+    this.imgs = this.imgs || {};
+    const scene = ['uDay', 'uEve', 'uOver', 'uStorm'].includes(k) && CFG.vcr;
     return (this.loading[k] = new Promise((res, rej) => {
       const im = new Image(); im.decoding = 'async';
       im.onload = () => {
-        const up = () => {
+        const up = async () => {
+          let src = im;
+          if (scene) {                                  // видеомагнитофон дорисовывается в саму сцену
+            try {
+              if (k === 'uDay') { await this.loadUnit('uSun').catch(() => {}); }
+              src = VCR.compose(im, k, this.imgs.uSun);
+            } catch (e) { console.warn('[Tube TV] видик:', e); src = im; }
+          }
+          this.imgs[k] = im;
           gl.activeTexture(gl.TEXTURE0 + i); gl.bindTexture(gl.TEXTURE_2D, this.tex[k]);
           gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, im);
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src);
           if (k === 'uLace') { gl.generateMipmap(gl.TEXTURE_2D); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR); }
           this.dirty = true; this.loading[k].done = true; res();
         };
@@ -1060,6 +1072,11 @@ const TV = {
   activateVideo(on) {
     const ch = this.channel();
     if (ch && ch.type === 'youtube') { if (on && this.on) Embed.play(ch); else Embed.stop(); return; }
+    if (ch && ch.type === 'vcr') {                       // видео с кассеты: только если кассета в видике
+      Embed.el.classList.toggle('vhs', on && this.on && VCR.loaded);
+      if (on && this.on && VCR.loaded) Embed.play(ch); else Embed.stop();
+      return;
+    }
     if (!ch || ch.type !== 'video') return;
     if (on && this.on) this.loadClip(ch);
     else if (ch._video) ch._video.pause();
@@ -1082,6 +1099,9 @@ const TV = {
         else Channels.noVideo(g, W, H, sec, ch, this.ch + 1);
         break;
       }
+      case 'vcr':
+        if (!VCR.loaded) { Channels.avBlue(g, W, H, sec); break; }
+        // fallthrough — кассета играет, как YouTube-канал
       case 'youtube': {
         if (Embed.failed) { Channels.noVideo(g, W, H, sec, ch, this.ch + 1, Embed.msg); break; }
         g.fillStyle = '#000'; g.fillRect(0, 0, W, H);
@@ -1118,7 +1138,7 @@ const TV = {
       gl.uniform1f(u.uFlicker, REDUCED ? 0 : 1);
       gl.uniform1f(u.uCurv, CFG.screen.curvature);
       gl.uniform1f(u.uScan, Math.min(240, H / 2.6));
-      const yt = ch.type === 'youtube' && Embed.showing();
+      const yt = (ch.type === 'youtube' || ch.type === 'vcr') && Embed.showing();
       gl.uniform1f(u.uGrain, (REDUCED ? 0.02 : 0.07) * (yt ? CFG.embed.crt : 1));
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     } else if (this.c2d) {
@@ -1138,7 +1158,7 @@ const TV = {
   /* Средний цвет экрана — для свечения на стене */
   sampleAvg(st) {
     let r = 0.6, g = 0.62, b = 0.68;
-    if (this.channel().type === 'youtube' && Embed.showing()) {          // пиксели плеера недоступны — «живое» голубое мерцание
+    if ((this.channel().type === 'youtube' || this.channel().type === 'vcr') && Embed.showing()) {          // пиксели плеера недоступны — «живое» голубое мерцание
       const k = nowMs() / 1000;
       const v = 0.45 + 0.25 * Math.sin(k * 1.3) * Math.sin(k * 0.37) + 0.1 * Math.random();
       this.avg = [v * 0.85, v * 0.92, v * 1.05]; this.avgLum = v; return;
@@ -1291,6 +1311,13 @@ const Channels = {
     g.textAlign = 'center'; g.textBaseline = 'middle'; g.font = `14px ${PIX}`; g.fillStyle = '#e8f0ff';
     if (Math.floor(sec * 1.5) % 2 === 0 || REDUCED) g.fillText(txt, W / 2, H / 2 - 6);
     g.font = `8px ${PIX}`; g.fillStyle = '#9fb0d0'; g.fillText(ch.label || '', W / 2, H / 2 + 16);
+  },
+  /* AV без кассеты — синий экран, как у видика без сигнала */
+  avBlue(g, W, H, sec) {
+    g.fillStyle = '#1a2fbf'; g.fillRect(0, 0, W, H);
+    g.fillStyle = '#e8ecff'; g.font = `${Math.round(H * 0.075)}px "Press Start 2P", monospace`; g.textAlign = 'left'; g.textBaseline = 'top';
+    g.fillText('AV', W * 0.08, H * 0.08);
+    if (Math.floor(sec * 1.2) % 2) { g.textAlign = 'center'; g.font = `${Math.round(H * 0.045)}px "Press Start 2P", monospace`; g.fillText('ВСТАВЬТЕ КАССЕТУ', W / 2, H * 0.82); }
   },
   noVideo(g, W, H, sec, ch, num, msg) {
     g.fillStyle = '#1736c4'; g.fillRect(0, 0, W, H);
@@ -2811,6 +2838,8 @@ const Zones = {
       { id: 'window', cls: 'window', pad: 0, label: () => T.weatherNext[nextIn(CFG.weatherCycle, state.weather)] },
       { id: 'drape', cls: 'drape', pad: 0, label: () => T.drape[Vent.index()] },
       ...(CFG.radio ? [{ id: 'radio', cls: 'radio', pad: 0.04, label: () => Radio.label() }] : []),
+      ...(CFG.vcr ? [{ id: 'vcr', cls: 'prop-zone', pad: 0.04, label: () => VCR.label() }] : []),
+      ...(CFG.props ? [{ id: 'clock', cls: 'prop-zone', pad: 0.05, label: () => Props.clockLabel() }, { id: 'calendar', cls: 'prop-zone', pad: 0.05, label: () => Props.calLabel() }] : []),
       ...CFG.eggs.map(e => ({ id: e.id, cls: 'egg' + (e.eveningOnly ? ' evening-only' : ''), pad: 0.22, label: () => e.label, egg: e })),
     ];
   },
@@ -2901,6 +2930,12 @@ const Zones = {
       if (HOVER && el.matches(':hover')) this.showCaption(el);
     } else if (d.id === 'radio') {
       Radio.click();
+    } else if (d.id === 'clock') {
+      Props.ring();
+    } else if (d.id === 'vcr') {
+      VCR.click();
+    } else if (d.id === 'calendar') {
+      Props.tear();
     } else if (d.egg) {
       this.playEgg(d.egg, el);
     }
@@ -3173,28 +3208,31 @@ const Puppets = {
     /* статуэтка: настоящий поворот вокруг оси (цилиндрическая проекция в WebGL) */
     async turntable(p) {
       const tt = this.ttSetup(p);
-      if (!tt || !this.ttUpload(p)) {                       // запасной вариант без WebGL / на file://
+      if (!tt || !this.ttUpload(p)) {                       // запасной вариант без WebGL
         p.body.style.transformOrigin = '50% 96%';
         await wa(p.body, this.k([[0, 0, 0, 0, 0], [0.25, -2, 0, 40, 0], [0.5, 0, 0, -38, 0], [0.75, -2, 0, 30, 0], [1, 0, 0, 0, 0]]), { duration: 5000, easing: 'ease-in-out' });
         return;
       }
       this.ttResize(p);
-      tt.c.hidden = false;
       this.ttDraw(p, 0);
+      tt.c.style.opacity = '0'; tt.c.hidden = false;
+      await wa(tt.c, [{ opacity: 0 }, { opacity: 1 }], { duration: 240, fill: 'forwards' });   // фото → модель без скачка
+      tt.c.style.opacity = '1';
       p.el.classList.add('no-sprite');
-      const d = REDUCED ? 4200 : 5600, t0 = nowMs();
+      const d = REDUCED ? 4200 : 6200, t0 = nowMs(), turns = REDUCED ? 1 : 1;
       await new Promise(res => {
         const step = () => {
           const k = clamp((nowMs() - t0) / d, 0, 1);
           const e = k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2;   // easeInOutCubic
-          this.ttDraw(p, e * Math.PI * 2);
+          this.ttDraw(p, e * Math.PI * 2 * turns);
           tt.c.style.transform = `translateY(${-Math.sin(k * Math.PI) * 3}%)`;
           if (k < 1) requestAnimationFrame(step); else res();
         };
         requestAnimationFrame(step);
       });
       p.el.classList.remove('no-sprite');
-      tt.c.hidden = true; tt.c.style.transform = '';
+      await wa(tt.c, [{ opacity: 1 }, { opacity: 0 }], { duration: 260, fill: 'forwards' });
+      tt.c.hidden = true; tt.c.style.transform = ''; tt.c.style.opacity = '';
     },
   },
 
@@ -3277,133 +3315,190 @@ const Puppets = {
     }, delay));
   },
 
-  /* ---------- проигрыватель статуэтки ---------- */
+  /* ---------- статуэтка: настоящая 3D-модель ----------
+     Фарфоровая девочка с корзинкой собрана из поля расстояний (подставка, юбка колоколом со складками
+     и оборкой, фартук, лиф с рукавами-фонариками, голова, капор, руки, корзинка с цветами) и рисуется
+     трассировкой лучей: мягкие тени, затенение в складках, блик глазури. Лицевая сторона дополнительно
+     «расписана» самой фотографией — лицо, цветы, складки остаются те же, что на картинке. */
   ttSetup(p) {
     if (p.tt) return p.tt.gl ? p.tt : null;
     const c = document.createElement('canvas'); c.className = 'tt'; c.hidden = true;
     p.el.appendChild(c);
-    const gl = c.getContext('webgl', { alpha: true, premultipliedAlpha: true, antialias: true });
+    const gl = c.getContext('webgl', { alpha: true, premultipliedAlpha: false, antialias: false });
     p.tt = { c, gl: null, dirty: true };
     if (!gl) return null;
     c.addEventListener('webglcontextlost', e => { e.preventDefault(); c.remove(); if (p.tt && p.tt.c === c) p.tt = null; });
-    const VS = 'attribute vec2 a; varying vec2 v; void main(){ v = a * 0.5 + 0.5; gl_Position = vec4(a, 0.0, 1.0); }';
+    const VS = 'attribute vec2 a; varying vec2 v; void main(){ v = a * 0.5 + 0.5; v.y = 1.0 - v.y; gl_Position = vec4(a, 0.0, 1.0); }';
     const FS = `
-#ifdef GL_FRAGMENT_PRECISION_HIGH
 precision highp float;
-#else
-precision mediump float;
-#endif
 varying vec2 v;
-uniform sampler2D uTex, uProf, uRow;
-uniform float uTheta, uL, uFront;
-float sh(float a){ return 0.42 + 0.58 * max(cos(a - uL), 0.0); }
+uniform sampler2D uPhoto;        // вырезка статуэтки из фото (RGBA)
+uniform float uTheta, uPhotoW;   // угол поворота, сила росписи с фото
+uniform vec3 uKey, uAmbT, uAmbB, uKeyC;   // свет: направление, небо/пол, цвет ключевого
+uniform vec4 uBox;               // как модельные координаты ложатся на холст: (масштаб x, масштаб y, сдвиг x, сдвиг y)
+uniform vec4 uPh;                // проекция фото: px на единицу, центр x (px), низ y (px)
+uniform vec2 uPhSize;            // размер фото, px
+float sdSph(vec3 p, float r){ return length(p) - r; }
+float sdEll(vec3 p, vec3 r){ float k0 = length(p / r), k1 = length(p / (r * r)); return k0 * (k0 - 1.0) / k1; }
+float sdCap(vec3 p, vec3 a, vec3 b, float r){ vec3 pa = p - a, ba = b - a; float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0); return length(pa - ba * h) - r; }
+float smin(float a, float b, float k){ float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0); return mix(b, a, h) - k * h * (1.0 - h); }
+/* юбка: тело вращения с профилем r(y) и складками */
+float skirt(vec3 p, float y0, float y1, float r0, float r1, float cx0, float cx1, float folds, float fa){
+  float t = clamp((p.y - y0) / (y1 - y0), 0.0, 1.0);
+  float cx = mix(cx0, cx1, t);
+  vec2 q = vec2(p.x - cx, p.z * 1.18);
+  float ang = atan(q.y, q.x);
+  float r = mix(r0, r1, pow(t, 0.85)) + fa * (1.0 - t) * sin(ang * folds) + fa * 0.4 * sin(ang * folds * 2.0 + 1.3) * (1.0 - t);
+  float d = length(q) - r;
+  float dy = max(y0 - p.y, p.y - y1);
+  return max(d * 0.8, dy);
+}
+vec2 map(vec3 p){
+  // подставка: невысокий овальный цоколь с фаской
+  vec2 q = vec2(length(p.xz * vec2(1.0, 1.3)) - 0.15, p.y - 0.035);
+  float base = min(max(q.x, abs(q.y) - 0.035), 0.0) + length(max(vec2(q.x, abs(q.y) - 0.035), 0.0)) - 0.01;
+  vec2 m = vec2(base, 1.0);
+  // нижняя юбка — колоколом, с глубокими складками и оборкой по подолу
+  float sk = skirt(p, 0.055, 0.37, 0.178, 0.118, -0.008, 0.03, 9.0, 0.016);
+  float ruffle = skirt(p, 0.055, 0.09, 0.19, 0.18, -0.008, -0.004, 23.0, 0.008);
+  // фартук-верхняя юбка до середины
+  float ap = skirt(p, 0.32, 0.575, 0.142, 0.092, 0.035, 0.025, 7.0, 0.01);
+  float dress = smin(smin(sk, ruffle, 0.01), ap, 0.015);
+  if (dress < m.x) m = vec2(dress, 2.0);
+  // лиф: сужается к талии, грудь чуть вперёд
+  vec3 tp = p - vec3(0.018, 0.665, 0.0);
+  float w = mix(0.07, 0.092, smoothstep(-0.09, 0.07, tp.y));
+  float torso = sdEll(tp, vec3(w, 0.11, 0.062));
+  // рукава-фонарики
+  float puffL = sdSph(p - vec3(-0.072, 0.735, 0.0), 0.04);
+  float puffR = sdSph(p - vec3(0.105, 0.73, 0.008), 0.038);
+  torso = smin(torso, min(puffL, puffR), 0.02);
+  if (torso < m.x) m = vec2(torso, 3.0);
+  float neck = sdCap(p, vec3(0.012, 0.75, 0.0), vec3(0.01, 0.82, 0.006), 0.026);
+  float head = sdEll(p - vec3(0.014, 0.862, 0.014), vec3(0.064, 0.072, 0.066));
+  float nose = sdSph(p - vec3(0.03, 0.86, 0.078), 0.012);
+  float face = smin(smin(neck, head, 0.02), nose, 0.012);
+  if (face < m.x) m = vec2(face, 4.0);
+  // волосы и шляпка-капор: облегает голову, поля приподняты справа
+  float hair = sdEll(p - vec3(0.0, 0.88, -0.022), vec3(0.074, 0.07, 0.07));
+  vec3 hp = p - vec3(0.018, 0.928, 0.0);
+  float c = cos(-0.22), s = sin(-0.22); hp.xy = mat2(c, -s, s, c) * hp.xy;
+  float crown = sdEll(hp - vec3(0.0, 0.01, -0.01), vec3(0.075, 0.045, 0.072));
+  float brim = max(sdEll(hp, vec3(0.112, 0.016, 0.1)), -sdEll(hp - vec3(0.0, -0.03, 0.0), vec3(0.08, 0.04, 0.075)));
+  float hh = smin(hair, smin(crown, brim, 0.01), 0.012);
+  if (hh < m.x) m = vec2(hh, 5.0);
+  // руки: левая вдоль тела к бедру, правая держит корзинку
+  float armL = sdCap(p, vec3(-0.08, 0.73, 0.0), vec3(-0.072, 0.63, 0.03), 0.022);
+  armL = smin(armL, sdCap(p, vec3(-0.072, 0.63, 0.03), vec3(-0.045, 0.565, 0.062), 0.019), 0.012);
+  float armR = smin(sdCap(p, vec3(0.108, 0.725, 0.01), vec3(0.122, 0.665, 0.05), 0.02), sdCap(p, vec3(0.122, 0.665, 0.05), vec3(0.1, 0.655, 0.085), 0.017), 0.01);
+  float arms = min(armL, armR);
+  if (arms < m.x) m = vec2(arms, 6.0);
+  float hand = sdEll(p - vec3(-0.04, 0.553, 0.07), vec3(0.022, 0.026, 0.02));
+  if (hand < m.x) m = vec2(hand, 4.0);
+  // корзинка с цветами
+  vec3 bp = p - vec3(0.122, 0.635, 0.07);
+  float bowl = max(sdEll(bp, vec3(0.082, 0.046, 0.058)), bp.y - 0.008);
+  bowl = max(bowl, -sdEll(bp - vec3(0.0, 0.01, 0.0), vec3(0.07, 0.04, 0.048)));
+  float flowers = sdEll(bp - vec3(0.0, 0.012, 0.0), vec3(0.07, 0.026, 0.05)) - 0.006 * sin(bp.x * 120.0) * sin(bp.z * 110.0);
+  float basket = min(bowl, flowers);
+  if (basket < m.x) m = vec2(basket, bowl < flowers ? 7.0 : 8.0);
+  return m;
+}
+vec3 nrm(vec3 p){ vec2 e = vec2(0.0015, 0.0); return normalize(vec3(map(p + e.xyy).x - map(p - e.xyy).x, map(p + e.yxy).x - map(p - e.yxy).x, map(p + e.yyx).x - map(p - e.yyx).x)); }
+float hsh(vec3 p){ return fract(sin(dot(p, vec3(12.9898, 78.233, 37.719))) * 43758.5453); }
+vec3 albedo(float id, vec3 p){
+  vec3 porc = vec3(0.93, 0.91, 0.86);
+  if (id < 1.5) return porc * 0.96;
+  if (id < 2.5) { float band = smoothstep(0.345, 0.335, p.y) * smoothstep(0.315, 0.328, p.y); vec3 d = mix(porc, vec3(0.80, 0.83, 0.87), 0.3 * smoothstep(0.37, 0.1, p.y)); return mix(d, vec3(0.90, 0.78, 0.58), band * 0.8); }
+  if (id < 3.5) return mix(porc, vec3(0.86, 0.88, 0.92), 0.4);
+  if (id < 4.5) return vec3(0.96, 0.85, 0.77);
+  if (id < 5.5) return vec3(0.86, 0.68, 0.38);
+  if (id < 6.5) return mix(porc, vec3(0.88, 0.89, 0.93), 0.3);
+  if (id < 7.5) return vec3(0.74, 0.56, 0.32);
+  float r = hsh(floor(p * 90.0));
+  return r < 0.4 ? vec3(0.95, 0.78, 0.30) : r < 0.65 ? vec3(0.86, 0.42, 0.40) : r < 0.85 ? vec3(0.52, 0.66, 0.38) : vec3(0.95, 0.93, 0.88);
+}
+float ao(vec3 p, vec3 n){ float o = 0.0, w = 1.0; for (int i = 1; i <= 5; i++){ float h = 0.012 * float(i); o += w * (h - map(p + n * h).x); w *= 0.6; } return clamp(1.0 - 4.0 * o, 0.0, 1.0); }
+float shadow(vec3 p, vec3 l){ float r = 1.0, t = 0.01; for (int i = 0; i < 24; i++){ float h = map(p + l * t).x; r = min(r, 10.0 * h / t); t += clamp(h, 0.006, 0.05); if (r < 0.02 || t > 0.6) break; } return clamp(r, 0.0, 1.0); }
 void main(){
-  vec2 uv = vec2(v.x, 1.0 - v.y);
-  vec4 pr = texture2D(uProf, vec2(uv.y, 0.5));
-  float c = (pr.r * 65280.0 + pr.b * 255.0) / 65535.0, r = (pr.g * 65280.0 + pr.a * 255.0) / 65535.0;
-  if (r < 0.006) { gl_FragColor = vec4(0.0); return; }
-  float s = (uv.x - c) / r;
-  if (abs(s) > 1.0) { gl_FragColor = vec4(0.0); return; }
-  float phi = asin(s);                                   // угол точки поверхности, которую мы видим
-  float p0 = mod(phi - uTheta + 3.14159265, 6.2831853) - 3.14159265;  // где эта точка была на фото
-  // 1) лицевая сторона: исходная фотография, переложенная на цилиндр
-  vec4 tex = texture2D(uTex, vec2(c + r * sin(p0), uv.y), -0.3);
-  float pf = abs(p0) > 1.5707963 ? (p0 > 0.0 ? 3.14159265 - p0 : -3.14159265 - p0) : p0;
-  tex.rgb *= clamp(sh(phi) / sh(pf), 0.6, 1.45);
-  // 2) бока и спина: та же фигурка «с обратной стороны» — зеркальная и сильно размытая
-  //    (цвет волос, платья, корзинки остаётся на своих местах, а лицо и мелкие детали исчезают)
-  float pb = p0 > 0.0 ? 3.14159265 - p0 : -3.14159265 - p0;   // точка спины → симметричная ей точка лица
-  float bx = c + r * sin(pb);
-  vec4 back = (texture2D(uTex, vec2(bx, uv.y - 0.012), 2.6) + texture2D(uTex, vec2(bx, uv.y), 2.6) + texture2D(uTex, vec2(bx, uv.y + 0.012), 2.6)) / 3.0;
-  vec3 rowc = texture2D(uRow, vec2(uv.y, 0.5)).rgb;
-  vec3 base = back.a > 0.05 ? mix(back.rgb / back.a, rowc, 0.25) : rowc;
-  vec3 N = vec3(sin(phi), 0.0, cos(phi));
-  vec3 L = normalize(vec3(sin(uL), 0.25, cos(uL)));
-  float dif = max(dot(N, L), 0.0);
-  float spec = pow(max(dot(reflect(-L, N), vec3(0.0, 0.0, 1.0)), 0.0), 36.0);
-  float fold = uv.y > 0.55 ? 0.06 * sin(p0 * 9.0 + uv.y * 7.0) : 0.0;
-  vec3 mat = base * (0.62 + 0.5 * dif) * (1.0 + fold) + vec3(spec * 0.22);
-  float w = smoothstep(1.95, 1.2, abs(p0));
-  w = mix(1.0, w, uFront);                               // в самом начале и конце — точно как на фото
-  vec3 col = mix(mat, tex.rgb, w);
-  float a = mix(1.0, tex.a, w);
-  float edge = smoothstep(1.0, 0.9, abs(s));
-  gl_FragColor = vec4(col * a * edge, a * edge);
+  vec2 m = vec2((v.x - uBox.z) / uBox.x, (1.0 - v.y - uBox.w) / uBox.y);    // модельные x, y
+  float c = cos(uTheta), s = sin(uTheta);
+  mat3 R = mat3(c, 0.0, -s, 0.0, 1.0, 0.0, s, 0.0, c);                     // поворот вокруг вертикали
+  mat3 Ri = mat3(c, 0.0, s, 0.0, 1.0, 0.0, -s, 0.0, c);
+  vec3 ro = R * vec3(m.x, m.y, 1.0), rd = R * vec3(0.0, 0.0, -1.0);
+  float t = 0.0, id = -1.0;
+  for (int i = 0; i < 72; i++){ vec2 h = map(ro + rd * t); if (h.x < 0.0008){ id = h.y; break; } t += h.x * 0.9; if (t > 2.0) break; }
+  if (id < 0.0){ gl_FragColor = vec4(0.0); return; }
+  vec3 p = ro + rd * t, n = nrm(p);
+  vec3 alb = albedo(id, p);
+  // роспись с фотографии на лицевой стороне (в системе самой фигурки)
+  vec2 ph = vec2(uPh.y + p.x * uPh.x, uPh.z - p.y * uPh.x) / uPhSize;
+  vec4 photo = texture2D(uPhoto, vec2(ph.x, ph.y));
+  float front = smoothstep(0.15, 0.75, n.z) * photo.a * uPhotoW;
+  // освещение в мире: ключевой свет сцены, небо/пол, фарфоровая глазурь
+  vec3 nw = R * n, vw = -rd;
+  vec3 L = normalize(uKey);
+  float dif = max(dot(nw, L), 0.0) * shadow(p, Ri * L);
+  vec3 amb = mix(uAmbB, uAmbT, nw.y * 0.5 + 0.5);
+  float o = ao(p, n);
+  vec3 col = alb * (amb * o + uKeyC * dif);
+  vec3 H = normalize(L + vw);
+  float spec = pow(max(dot(nw, H), 0.0), 60.0) * (0.35 + 0.65 * dif);
+  float fres = pow(1.0 - max(dot(nw, vw), 0.0), 4.0);
+  col += uKeyC * spec * 0.55 + amb * fres * 0.18;
+  // фото уже содержит свет сцены — смешиваем с ним в лицевой зоне
+  vec3 phc = photo.rgb / max(photo.a, 0.001);
+  col = mix(col, phc * (0.75 + 0.5 * dif) + uKeyC * spec * 0.3, front);
+  gl_FragColor = vec4(col, 1.0);
 }`;
     const sh = (t, s) => { const o = gl.createShader(t); gl.shaderSource(o, s); gl.compileShader(o); if (!gl.getShaderParameter(o, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(o)); return o; };
     try {
       const prog = gl.createProgram();
       gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS)); gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FS));
-      gl.linkProgram(prog); gl.useProgram(prog);
+      gl.bindAttribLocation(prog, 0, 'a'); gl.linkProgram(prog); gl.useProgram(prog);
       const b = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, b);
       gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
-      const loc = gl.getAttribLocation(prog, 'a'); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
-      p.tt.tex = gl.createTexture(); p.tt.prof = gl.createTexture(); p.tt.row = gl.createTexture();
-      p.tt.u = { theta: gl.getUniformLocation(prog, 'uTheta'), L: gl.getUniformLocation(prog, 'uL'), front: gl.getUniformLocation(prog, 'uFront') };
-      gl.uniform1i(gl.getUniformLocation(prog, 'uTex'), 0);
-      gl.uniform1i(gl.getUniformLocation(prog, 'uProf'), 1);
-      gl.uniform1i(gl.getUniformLocation(prog, 'uRow'), 2);
-      gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+      gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+      const U = n => gl.getUniformLocation(prog, n);
+      p.tt.u = { theta: U('uTheta'), photoW: U('uPhotoW'), key: U('uKey'), ambT: U('uAmbT'), ambB: U('uAmbB'), keyC: U('uKeyC'), box: U('uBox'), ph: U('uPh'), phSize: U('uPhSize') };
+      p.tt.tex = gl.createTexture();
+      gl.uniform1i(U('uPhoto'), 0);
+      // модель: 1 ед. = 95 px фото, низ подставки — y = 112 px, ось — x = 37.5 px (в коробке 75×123)
+      const [, , bw, bh] = p.box, F = CFG.figurine || {}, unit = F.unitPx || 95, cx = F.axisX || 37.5, by = F.baseY || 112;
+      gl.uniform4f(p.tt.u.box, unit / bw, unit / bh, cx / bw, (bh - by) / bh);
+      gl.uniform4f(p.tt.u.ph, unit, cx, by, 0); gl.uniform2f(p.tt.u.phSize, bw, bh);
       p.tt.gl = gl;
       return p.tt;
-    } catch (err) { console.warn('[Tube TV] проигрыватель статуэтки:', err); return null; }
+    } catch (err) { console.warn('[Tube TV] статуэтка:', err); return null; }
   },
+  /* фото → текстура; средний цвет фото задаёт экспозицию и тон света модели в этой сцене */
   ttUpload(p) {
     const tt = p.tt, gl = tt.gl;
     if (!tt.dirty) return true;
     const img = p.sprite;
     if (!img.complete || !img.naturalWidth) return false;
-    const W = 256, H = 512;
-    const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
-    const g = cv.getContext('2d', { willReadFrequently: true });
-    g.drawImage(img, 0, 0, W, H);
-    let d;
-    try { d = g.getImageData(0, 0, W, H).data; } catch (_) { return false; }   // file:// — без WebGL-поворота
-    const cs = new Float32Array(H), rs = new Float32Array(H), row = new Uint8Array(H * 4);
-    for (let y = 0; y < H; y++) {
-      let mn = -1, mx = -1, R = 0, G = 0, B = 0, n = 0;
-      for (let x = 0; x < W; x++) {
-        const i = (y * W + x) * 4;
-        if (d[i + 3] > 50) { if (mn < 0) mn = x; mx = x; }
-        if (d[i + 3] > 200) { R += d[i]; G += d[i + 1]; B += d[i + 2]; n++; }
-      }
-      if (mn >= 0) { cs[y] = (mn + mx + 1) / 2 / W; rs[y] = (mx - mn + 1) / 2 / W + 1 / W; }
-      if (n) { row[y * 4] = Math.min(255, R / n); row[y * 4 + 1] = Math.min(255, G / n); row[y * 4 + 2] = Math.min(255, B / n); }
-      row[y * 4 + 3] = 255;
-    }
-    const sm = (arr, R) => arr.map((_, i) => { let s = 0, k2 = 0; for (let k = -R; k <= R; k++) { const v = arr[i + k]; if (v > 0) { s += v; k2++; } } return arr[i] > 0 && k2 ? s / k2 : 0; });
-    const C = sm(sm(cs, 20), 14), Rr = sm(sm(rs, 12), 8);
-    for (let y = 1; y < H; y++) if (!row[y * 4] && row[(y - 1) * 4]) { row[y * 4] = row[(y - 1) * 4]; row[y * 4 + 1] = row[(y - 1) * 4 + 1]; row[y * 4 + 2] = row[(y - 1) * 4 + 2]; }
-    // сглаживаем цвет по высоте (иначе мелкие детали дают полосы) и чуть уводим в фарфоровый
-    for (let ch = 0; ch < 3; ch++) {
-      const src = Array.from({ length: H }, (_, y) => row[y * 4 + ch]);
-      for (let y = 0; y < H; y++) {
-        let s = 0, n = 0;
-        for (let k = -18; k <= 18; k++) { const v = src[y + k]; if (v) { s += v; n++; } }
-        if (n) { const lum = (row[y * 4] * 0.3 + row[y * 4 + 1] * 0.59 + row[y * 4 + 2] * 0.11); row[y * 4 + ch] = Math.min(255, (s / n) * 0.75 + lum * 0.25); }
-      }
-    }
-    const prof = new Uint8Array(H * 4);
-    // 16 бит на значение (старший байт в R/G, младший в B/A) — иначе 8-битные ступеньки радиуса дают полосы
-    for (let y = 0; y < H; y++) {
-      const c16 = Math.round(clamp(C[y], 0, 1) * 65535), r16 = Math.round(clamp(Rr[y], 0, 1) * 65535);
-      prof[y * 4] = c16 >> 8; prof[y * 4 + 1] = r16 >> 8; prof[y * 4 + 2] = c16 & 255; prof[y * 4 + 3] = r16 & 255;
-    }
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tt.tex);
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, cv);
-    gl.generateMipmap(gl.TEXTURE_2D);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, tt.prof);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, H, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, prof);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, tt.row);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, H, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, row);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+    for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, k, v);
+    let C = [0.6, 0.55, 0.5];
+    try {
+      const cv = document.createElement('canvas'); cv.width = 32; cv.height = 48;
+      const g = cv.getContext('2d', { willReadFrequently: true }); g.drawImage(img, 0, 0, 32, 48);
+      const d = g.getImageData(0, 0, 32, 48).data; let r = 0, gg = 0, b = 0, n = 0;
+      for (let i = 0; i < d.length; i += 4) if (d[i + 3] > 200) { r += d[i]; gg += d[i + 1]; b += d[i + 2]; n++; }
+      if (n) C = [r / n / 255, gg / n / 255, b / n / 255].map(x => Math.pow(x, 2.2));
+    } catch (_) {}
+    // свет по сцене: откуда ключевой (днём — окно справа, вечером — торшер слева, ночью — экран спереди)
+    const K = { day: [0.7, 0.45, 0.55], sunset: [0.85, 0.22, 0.48], evening: [-0.8, 0.35, 0.5], overcast: [0.5, 0.6, 0.6], storm: [0.4, 0.6, 0.7], night: [0.0, 0.1, 1.0] }[state.scene] || [0.6, 0.5, 0.6];
+    const T = { day: [1.0, 0.95, 0.85], sunset: [1.15, 0.8, 0.55], evening: [1.1, 0.88, 0.62], overcast: [0.92, 0.97, 1.05], storm: [0.88, 0.95, 1.08], night: [0.8, 0.9, 1.25] }[state.scene] || [1, 1, 1];
+    const g2 = x => Math.pow(x, 1 / 2.2);
+    const base = C.map(g2), lum = base[0] * 0.3 + base[1] * 0.59 + base[2] * 0.11;
+    const k = lum / 0.62;                                           // модель при k=1 даёт яркость ~0.62
+    gl.uniform3fv(tt.u.key, K);
+    gl.uniform3fv(tt.u.ambT, T.map(t => 0.58 * k * t));
+    gl.uniform3fv(tt.u.ambB, T.map(t => 0.3 * k * t));
+    gl.uniform3fv(tt.u.keyC, T.map(t => 0.62 * k * t));
     tt.dirty = false;
     return true;
   },
@@ -3418,9 +3513,9 @@ void main(){
     const gl = p.tt.gl;
     gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
     gl.uniform1f(p.tt.u.theta, theta);
-    const away = Math.min(theta, Math.PI * 2 - theta);
-    gl.uniform1f(p.tt.u.front, smooth(0, 0.35, away));
-    gl.uniform1f(p.tt.u.L, { day: 0.7, sunset: 0.95, overcast: 0.15, storm: 0.1, evening: -0.9 }[state.scene] ?? 0.7);   // днём свет из окна справа, вечером — торшер слева
+    // роспись с фото сильнее, когда фигурка смотрит на нас, — в начале и в конце совпадает с картинкой
+    const away = Math.min(Math.abs(theta % (Math.PI * 2)), Math.PI * 2 - Math.abs(theta % (Math.PI * 2)));
+    gl.uniform1f(p.tt.u.photoW, 0.55 + 0.4 * (1 - smooth(0, 0.6, away)));
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   },
 };
@@ -3761,6 +3856,426 @@ const Radio = {
   },
 };
 
+/* ==========================================================================
+   7d. БУДИЛЬНИК И ОТРЫВНОЙ КАЛЕНДАРЬ
+   Оба нарисованы кодом и освещены так же, как радиоточка (свет ниши по сцене).
+   Будильник на телевизоре справа показывает настоящее время и звенит по щелчку;
+   календарик висит на гвоздике в нише — сегодняшнее число, только год 1995-й;
+   листок можно оторвать.
+   ========================================================================== */
+const MONTHS = ['ЯНВАРЬ', 'ФЕВРАЛЬ', 'МАРТ', 'АПРЕЛЬ', 'МАЙ', 'ИЮНЬ', 'ИЮЛЬ', 'АВГУСТ', 'СЕНТЯБРЬ', 'ОКТЯБРЬ', 'НОЯБРЬ', 'ДЕКАБРЬ'];
+const MONTHS_GEN = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
+const WEEKDAYS = ['ВОСКРЕСЕНЬЕ', 'ПОНЕДЕЛЬНИК', 'ВТОРНИК', 'СРЕДА', 'ЧЕТВЕРГ', 'ПЯТНИЦА', 'СУББОТА'];
+/* восход и заход солнца в Москве (формулы NOAA, точность ±2 мин) */
+function sunTimes(date, lat = 55.75, lon = 37.62, tz = 3) {
+  const rad = Math.PI / 180, start = Date.UTC(date.getFullYear(), 0, 0);
+  const N = Math.floor((Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) - start) / 864e5);
+  const g = 2 * Math.PI / 365 * (N - 1);
+  const eq = 229.18 * (0.000075 + 0.001868 * Math.cos(g) - 0.032077 * Math.sin(g) - 0.014615 * Math.cos(2 * g) - 0.040849 * Math.sin(2 * g));
+  const dec = 0.006918 - 0.399912 * Math.cos(g) + 0.070257 * Math.sin(g) - 0.006758 * Math.cos(2 * g) + 0.000907 * Math.sin(2 * g) - 0.002697 * Math.cos(3 * g) + 0.00148 * Math.sin(3 * g);
+  const ha = Math.acos(Math.cos(90.833 * rad) / (Math.cos(lat * rad) * Math.cos(dec)) - Math.tan(lat * rad) * Math.tan(dec)) / rad;
+  const fmt = m => { m = (m + 1440) % 1440; return `${Math.floor(m / 60)}:${String(Math.round(m % 60)).padStart(2, '0')}`; };
+  return { rise: fmt(720 - 4 * (lon + ha) - eq + tz * 60), set: fmt(720 - 4 * (lon - ha) - eq + tz * 60) };
+}
+
+const Props = {
+  init() {
+    this.clock = this.mk('clock', CFG.props.clock.box, 'prop-clock');
+    this.cal = this.mk('calendar', CFG.props.calendar.box, 'prop-cal');
+    this.day = this.day || this.today();
+    this.resize();
+    addEventListener('resize', () => this.resize());
+    this._sec = -1;
+  },
+  mk(id, box, cls) {
+    const [x, y, w, h] = box;
+    const el = document.createElement('div'); el.className = 'prop ' + cls;
+    Object.assign(el.style, { left: x / IMG_W * 100 + '%', top: y / IMG_H * 100 + '%', width: w / IMG_W * 100 + '%', height: h / IMG_H * 100 + '%' });
+    el.innerHTML = '<canvas></canvas>';
+    stageEl.insertBefore(el, $('#glow'));
+    const cv = el.querySelector('canvas');
+    return { id, el, cv, g: cv.getContext('2d'), box };
+  },
+  resize() {
+    const k = Math.min(4, state.stage.u * (devicePixelRatio || 1) * (Camera.seated ? state.zoom || 1 : 1));
+    for (const o of [this.clock, this.cal]) {
+      if (!o) continue;
+      const W = Math.round(o.box[2] * k), H = Math.round(o.box[3] * k);
+      if (o.cv.width !== W || o.cv.height !== H) { o.cv.width = W; o.cv.height = H; }
+      o.k = k;
+    }
+    this.draw(true);
+  },
+  update(t) {
+    const s = Math.floor(Date.now() / 1000);
+    const relit = !!Radio.lightTo;                          // свет сцены меняется — перерисовываем
+    if (s !== this._sec || relit) { this._sec = s; this.drawClock(); if (relit) this.drawCal(); if (!relit) this.tick(); }
+  },
+  draw() { this.drawClock(); this.drawCal(); },
+  L() { return Radio.light || { c: [0.5, 0.45, 0.4], dir: 0.5 }; },
+  lit(rgb, s = 1) { const L = this.L(); return `rgb(${rgb.map((v, i) => clamp(Math.round(v * L.c[i] * s), 0, 255)).join(',')})`; },
+
+  /* ---------- будильник ---------- */
+  drawClock() {
+    const o = this.clock; if (!o) return;
+    const g = o.g, k = o.k, L = this.L(), lum = L.c[0] * 0.3 + L.c[1] * 0.59 + L.c[2] * 0.11;
+    g.setTransform(1, 0, 0, 1, 0, 0); g.clearRect(0, 0, o.cv.width, o.cv.height);
+    const sh = this.shake || 0, jx = sh ? (Math.random() - 0.5) * 1.6 * sh : 0, jr = sh ? (Math.random() - 0.5) * 0.05 * sh : 0;
+    g.setTransform(k, 0, 0, k, (44 + jx) * k, 50 * k); g.rotate(jr);
+    const R = 26, lit = (c, s) => this.lit(c, s);
+    // тень на стенку и на крышку телевизора
+    g.save(); g.shadowColor = 'rgba(8,4,2,.55)'; g.shadowBlur = 8 * k; g.shadowOffsetX = -L.dir * 6 * k; g.shadowOffsetY = 1 * k;
+    g.fillStyle = '#000'; g.beginPath(); g.arc(0, 0, R, 0, Math.PI * 2); g.fill(); g.restore();
+    g.clearRect(-R - 1, -R - 1, 2 * R + 2, 2 * R + 2);
+    g.save(); g.globalAlpha = 0.55; const cs = g.createRadialGradient(0, R + 9, 1, 0, R + 9, 30); cs.addColorStop(0, 'rgba(10,5,2,.9)'); cs.addColorStop(1, 'rgba(10,5,2,0)');
+    g.fillStyle = cs; g.scale(1, 0.18); g.fillRect(-34, (R + 2) / 0.18, 68, 14 / 0.18); g.restore();
+    // ножки
+    for (const s of [-1, 1]) { g.fillStyle = lit([200, 200, 205], 0.9); g.beginPath(); g.ellipse(s * 15, R + 4, 4, 3, 0, 0, Math.PI * 2); g.fill(); g.fillStyle = lit([120, 120, 125]); g.fillRect(s * 15 - 1.5, R - 2, 3, 5); }
+    // звонки-чашки и молоточек
+    const chrome = (x0, y0, r) => { const gr = g.createRadialGradient(x0 - r * 0.35 * (L.dir < 0 ? 1 : -1), y0 - r * 0.4, r * 0.1, x0, y0, r);
+      gr.addColorStop(0, lit([255, 255, 255], 1.25)); gr.addColorStop(0.45, lit([190, 192, 200])); gr.addColorStop(1, lit([70, 72, 80])); return gr; };
+    for (const s of [-1, 1]) {
+      const bx = s * 17, by = -R - 3;
+      g.fillStyle = lit([150, 150, 155]); g.fillRect(bx - 1, by + 6, 2, 6);
+      g.fillStyle = chrome(bx, by, 12); g.beginPath(); g.arc(bx, by + 3, 11.5, Math.PI, 0); g.closePath(); g.fill();
+      g.fillStyle = lit([90, 90, 98]); g.fillRect(bx - 11.5, by + 2.4, 23, 1.2);
+      g.fillStyle = lit([235, 235, 240], 1.1); g.beginPath(); g.arc(bx, by - 8.5, 1.6, 0, Math.PI * 2); g.fill();
+    }
+    const hammer = this.ringing ? Math.sin(nowMs() / 18) * 5 : 0;
+    g.strokeStyle = lit([160, 160, 168]); g.lineWidth = 1.4; g.beginPath(); g.moveTo(0, -R + 2); g.lineTo(hammer, -R - 9); g.stroke();
+    g.fillStyle = lit([200, 200, 208]); g.beginPath(); g.arc(hammer, -R - 9.5, 2, 0, Math.PI * 2); g.fill();
+    // ручка-дужка
+    g.strokeStyle = chrome(0, -R - 14, 18); g.lineWidth = 2.2; g.beginPath(); g.ellipse(0, -R - 4, 13, 12, 0, Math.PI * 1.08, Math.PI * 1.92); g.stroke();
+    // корпус — красная эмаль
+    const body = g.createRadialGradient(-L.dir * 9, -12, 3, 0, 0, R * 1.05);
+    body.addColorStop(0, lit([235, 70, 52], 1.15)); body.addColorStop(0.6, lit([168, 30, 26])); body.addColorStop(1, lit([90, 14, 12]));
+    g.fillStyle = body; g.beginPath(); g.arc(0, 0, R, 0, Math.PI * 2); g.fill();
+    // ободок
+    g.lineWidth = 3; g.strokeStyle = chrome(0, 0, R); g.beginPath(); g.arc(0, 0, R - 2.6, 0, Math.PI * 2); g.stroke();
+    // циферблат
+    const dial = g.createRadialGradient(-4, -6, 2, 0, 0, R - 4);
+    dial.addColorStop(0, lit([252, 248, 236], 1.08)); dial.addColorStop(1, lit([214, 206, 186]));
+    g.fillStyle = dial; g.beginPath(); g.arc(0, 0, R - 4.2, 0, Math.PI * 2); g.fill();
+    for (let i = 0; i < 60; i++) {
+      const a = i / 60 * Math.PI * 2, big = i % 5 === 0, r0 = big ? R - 8.4 : R - 6.6;
+      g.strokeStyle = lit([30, 26, 22]); g.lineWidth = big ? 1.1 : 0.45;
+      g.beginPath(); g.moveTo(Math.sin(a) * r0, -Math.cos(a) * r0); g.lineTo(Math.sin(a) * (R - 5.4), -Math.cos(a) * (R - 5.4)); g.stroke();
+    }
+    g.fillStyle = lit([28, 24, 20]); g.font = `bold 6.4px "Arial Narrow", Arial, sans-serif`; g.textAlign = 'center'; g.textBaseline = 'middle';
+    for (const [n, a] of [[12, 0], [3, 90], [6, 180], [9, 270]]) { const r = R - 12.5, ar = a * Math.PI / 180; g.fillText(String(n), Math.sin(ar) * r, -Math.cos(ar) * r + 0.3); }
+    g.font = `3px Arial, sans-serif`; g.fillStyle = lit([120, 40, 30]); g.fillText('17 КАМНЕЙ', 0, 7);
+    // стрелки: настоящее время
+    const now = new Date(), sec = now.getSeconds(), min = now.getMinutes() + sec / 60, hr = (now.getHours() % 12) + min / 60;
+    const hand = (ang, len, wdt, col, tail = 3) => { g.save(); g.rotate(ang); g.fillStyle = col; g.beginPath(); g.moveTo(-wdt / 2, tail); g.lineTo(-wdt * 0.32, -len); g.lineTo(0, -len - 1.6); g.lineTo(wdt * 0.32, -len); g.lineTo(wdt / 2, tail); g.closePath(); g.fill(); g.restore(); };
+    g.save(); g.shadowColor = 'rgba(0,0,0,.35)'; g.shadowBlur = 1.5 * k; g.shadowOffsetX = -L.dir * 1 * k; g.shadowOffsetY = 0.8 * k;
+    hand(-0.6, 9, 1.4, lit([200, 160, 60]), 2);                                   // стрелка будильника — на 6:55
+    hand(hr / 12 * Math.PI * 2, 10.5, 2.4, lit([22, 20, 18]));
+    hand(min / 60 * Math.PI * 2, 15.5, 1.8, lit([22, 20, 18]));
+    g.save(); g.rotate(sec / 60 * Math.PI * 2); g.strokeStyle = lit([200, 30, 24], 1.1); g.lineWidth = 0.5; g.beginPath(); g.moveTo(0, 4); g.lineTo(0, -17.5); g.stroke(); g.restore();
+    g.restore();
+    g.fillStyle = lit([60, 55, 50]); g.beginPath(); g.arc(0, 0, 1.3, 0, Math.PI * 2); g.fill();
+    // стекло: блик
+    g.save(); g.beginPath(); g.arc(0, 0, R - 4.2, 0, Math.PI * 2); g.clip();
+    const gl = g.createLinearGradient(-R, -R, R * 0.2, R * 0.4); gl.addColorStop(0, `rgba(255,255,255,${0.32 * lum + 0.05})`); gl.addColorStop(0.45, 'rgba(255,255,255,0)');
+    g.fillStyle = gl; g.fillRect(-R, -R, 2 * R, 2 * R); g.restore();
+    g.strokeStyle = `rgba(255,250,240,${0.25 + 0.5 * lum})`; g.lineWidth = 0.8; g.beginPath(); g.arc(0, 0, R - 0.6, Math.PI * (L.dir < 0 ? 1.05 : 1.6), Math.PI * (L.dir < 0 ? 1.5 : 1.95)); g.stroke();
+  },
+  tick() {
+    if (!Sound.started || this.ringing || document.hidden) return;
+    const t = Sound.ctx.currentTime + 0.01, n = state.mode === 'night' ? 1 : state.mode === 'evening' ? 0.7 : 0.45;
+    Sound.burst(t, { dur: 0.008, vol: 0.05 * n, type: 'bandpass', f: (this._sec & 1) ? 3600 : 4300, q: 6, dest: Sound.sfx, pan: 0.3 });
+  },
+  ring() {
+    if (this.ringing) return;
+    this.ringing = true; Sound.start();
+    const dur = 2.6, t0 = nowMs();
+    if (Sound.started) {
+      const t = Sound.ctx.currentTime + 0.02, pan = 0.3;
+      for (let i = 0; i < dur * 22; i++) {                  // молоточек бьёт по двум чашкам ~22 раза в секунду
+        const tt = t + i / 22, a = i % 2 ? 2620 : 3180, v = 0.05 * (1 - smooth(dur - 0.4, dur, i / 22));
+        Sound.tone(tt, { f: a, dur: 0.12, vol: v, dest: Sound.sfx, pan });
+        Sound.tone(tt, { f: a * 2.76, dur: 0.05, vol: v * 0.35, dest: Sound.sfx, pan });
+        Sound.burst(tt, { dur: 0.004, vol: v * 0.8, f: 5200, q: 2, dest: Sound.sfx, pan });
+      }
+    }
+    const step = () => {
+      const k = (nowMs() - t0) / 1000;
+      this.shake = k < dur ? 1 - smooth(dur - 0.5, dur, k) : 0;
+      this.drawClock();
+      if (k < dur) requestAnimationFrame(step); else { this.ringing = false; this.shake = 0; this.drawClock(); }
+    };
+    requestAnimationFrame(step);
+  },
+  clockLabel() { const n = new Date(); return `Будильник. Сейчас ${n.getHours()}:${String(n.getMinutes()).padStart(2, '0')} — щёлкните, чтобы проверить звонок`; },
+
+  /* ---------- отрывной календарь ---------- */
+  drawCal(target, date) {
+    const o = this.cal; if (!o) return;
+    const g = target || o.g, k = o.k, L = this.L(), lit = (c, s) => this.lit(c, s);
+    const W = o.box[2], H = o.box[3];
+    if (!target) { g.setTransform(1, 0, 0, 1, 0, 0); g.clearRect(0, 0, o.cv.width, o.cv.height); }
+    g.setTransform(k, 0, 0, k, 0, 0);
+    const d = date || this.day, sunday = d.getDay() === 0, red = sunday || (d.getMonth() === 0 && d.getDate() <= 2);
+    const bx = 6, by = 8, bw = W - 12, bh = H - 14;
+    if (!target) {
+      // тень на стенку
+      g.save(); g.shadowColor = 'rgba(8,4,2,.5)'; g.shadowBlur = 5 * k; g.shadowOffsetX = -L.dir * 3 * k; g.shadowOffsetY = 2 * k;
+      g.fillStyle = '#000'; g.fillRect(bx, by, bw, bh); g.restore();
+      // картонная основа — бордовая, с золотым тиснением
+      g.fillStyle = lit([120, 30, 34]); g.fillRect(bx, by, bw, bh);
+      g.strokeStyle = lit([210, 168, 80]); g.lineWidth = 0.6; g.strokeRect(bx + 2, by + 2, bw - 4, 13);
+      g.fillStyle = lit([226, 186, 96]); g.font = `bold 4.6px "Arial Narrow", Arial, sans-serif`; g.textAlign = 'center'; g.textBaseline = 'middle';
+      g.fillText('1995', bx + bw / 2, by + 8.8);
+      // гвоздик и дырочка
+      g.fillStyle = lit([40, 30, 26]); g.beginPath(); g.arc(W / 2, 4.5, 1.6, 0, Math.PI * 2); g.fill();
+      g.fillStyle = lit([200, 200, 205], 1.2); g.beginPath(); g.arc(W / 2 - 0.4, 4.1, 0.7, 0, Math.PI * 2); g.fill();
+      g.strokeStyle = lit([30, 22, 18]); g.lineWidth = 0.5; g.beginPath(); g.moveTo(W / 2, 5); g.lineTo(bx + bw / 2 - 6, by + 0.5); g.moveTo(W / 2, 5); g.lineTo(bx + bw / 2 + 6, by + 0.5); g.stroke();
+      // торцы стопки листков
+      for (let i = 0; i < 5; i++) { g.fillStyle = lit(i % 2 ? [205, 200, 186] : [232, 228, 214]); g.fillRect(bx + 4, by + bh - 3.6 + i * 0.7, bw - 8, 0.7); }
+    }
+    // верхний листок
+    const px = bx + 4, py = by + 18, pw = bw - 8, ph = bh - 22;
+    const paper = g.createLinearGradient(px, py, px + pw, py + ph);
+    paper.addColorStop(0, lit([248, 244, 232], 1.05)); paper.addColorStop(1, lit([226, 220, 204]));
+    g.fillStyle = paper; g.fillRect(px, py, pw, ph);
+    g.strokeStyle = lit([180, 172, 156]); g.lineWidth = 0.3; g.strokeRect(px, py, pw, ph);
+    const ink = red ? lit([196, 30, 30], 1.1) : lit([26, 24, 22]);
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillStyle = lit([196, 30, 30], 1.1); g.font = `bold 4.2px "Arial Narrow", Arial, sans-serif`;
+    g.fillText(MONTHS[d.getMonth()], px + pw / 2, py + 4.2);
+    g.fillStyle = ink; g.font = `bold 19px "Arial Narrow", "Times New Roman", serif`;
+    g.fillText(String(d.getDate()), px + pw / 2, py + ph / 2 + 0.5);
+    g.font = `bold 3.6px "Arial Narrow", Arial, sans-serif`;
+    g.fillText(WEEKDAYS[d.getDay()], px + pw / 2, py + ph - 7.4);
+    const st = sunTimes(d);
+    g.fillStyle = lit([90, 84, 76]); g.font = `2.6px Arial, sans-serif`;
+    g.fillText(`восх. ${st.rise}  зах. ${st.set}`, px + pw / 2, py + ph - 3);
+  },
+  today() { const now = new Date(); return new Date(1995, now.getMonth(), now.getDate()); },
+  calLabel() {
+    const d = this.day || (this.day = this.today()), st = sunTimes(d);
+    return `Отрывной календарь: ${d.getDate()} ${MONTHS_GEN[d.getMonth()]} 1995, ${WEEKDAYS[d.getDay()].toLowerCase()}. Восход ${st.rise}, заход ${st.set}. Щёлкните — оторвать листок`;
+  },
+  tear() {
+    if (this.tearing) return;
+    this.tearing = true; Sound.start();
+    const o = this.cal, k = o.k;
+    // листок — отдельный холст, который отрывается и падает
+    const sheet = document.createElement('canvas'); sheet.width = o.cv.width; sheet.height = o.cv.height; sheet.className = 'cal-sheet';
+    this.drawCal(sheet.getContext('2d'), this.day);
+    o.el.appendChild(sheet);
+    if (Sound.started) {                                     // шорох и треск рвущейся бумаги
+      const t = Sound.ctx.currentTime + 0.01;
+      for (let i = 0; i < 9; i++) Sound.burst(t + i * 0.018 + Math.random() * 0.01, { dur: 0.02, vol: 0.05 + Math.random() * 0.05, type: 'bandpass', f: 2500 + Math.random() * 3000, q: 1.2, dest: Sound.sfx, pan: 0.15 });
+      Sound.burst(t + 0.2, { dur: 0.35, vol: 0.03, type: 'highpass', f: 3000, dest: Sound.sfx, pan: 0.1 });
+    }
+    this.day = new Date(this.day.getFullYear(), this.day.getMonth(), this.day.getDate() + 1);
+    this.drawCal();
+    const dir = Math.random() < 0.5 ? -1 : 1;
+    wa(sheet, [
+      { transform: 'translate(0,0) rotate(0deg)', opacity: 1, offset: 0 },
+      { transform: `translate(${dir * 6}%, -6%) rotate(${dir * 8}deg)`, opacity: 1, offset: 0.18 },
+      { transform: `translate(${dir * 40}%, 160%) rotate(${dir * 70}deg)`, opacity: 0.9, offset: 0.8 },
+      { transform: `translate(${dir * 55}%, 240%) rotate(${dir * 95}deg)`, opacity: 0, offset: 1 },
+    ], { duration: 1500, easing: 'cubic-bezier(.3,.1,.6,1)' }).then(() => { sheet.remove(); this.tearing = false; });
+    Zones.refreshLabels();
+    const z = Zones.els.calendar; if (z) Zones.showCaption(z, 3200);
+  },
+};
+
+/* ==========================================================================
+   7e. ВИДЕОМАГНИТОФОН
+   Стоит на полу под телевизором. Корпус дорисовывается прямо в картинки сцен
+   (до загрузки в WebGL), поэтому его освещает тот же расчёт, что и комнату:
+   на закате по нему ползут те же пятна, ночью — фонарь. Сверху — только то,
+   что светится само: табло и кассета, которая въезжает в щель.
+   ========================================================================== */
+const VCR = {
+  loaded: false,
+  /* 3D-коробка (метры, камера в начале координат): x0..x1, высота h1, перед z0, зад z1 */
+  box() { const B = CFG.vcr; return { x0: B.x - B.w / 2, x1: B.x + B.w / 2, h1: B.h, z0: -B.z, z1: -(B.z + B.d) }; },
+  proj(x, h, z) { const R = CFG.room; return [R.cx + R.f * x / -z, R.cy - R.f * (h - R.camH) / -z]; },
+  rects() {
+    const b = this.box();
+    const fl = this.proj(b.x0, b.h1, b.z0), fr = this.proj(b.x1, 0, b.z0);
+    const tl = this.proj(b.x0, b.h1, b.z1), tr = this.proj(b.x1, b.h1, b.z1);
+    return { front: [fl[0], fl[1], fr[0] - fl[0], fr[1] - fl[1]], top: [fl, [fr[0], fl[1]], tr, tl] };
+  },
+  /* корпус в «альбедо» (без света): передняя панель и крышка */
+  paint(g, E) {
+    const { front: [x, y, w, h], top } = this.rects();
+    const c = (rgb, k = 1) => `rgb(${rgb.map((v, i) => clamp(Math.round(255 * Math.pow(Math.pow(v / 255, 2.2) * E[i] * k, 1 / 2.2)), 0, 255)).join(',')})`;
+    // тень на пол вокруг (контактная)
+    g.save();
+    const sh = g.createRadialGradient(x + w / 2, y + h, 2, x + w / 2, y + h, w * 0.62);
+    sh.addColorStop(0, 'rgba(0,0,0,.55)'); sh.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = sh; g.translate(0, y + h); g.scale(1, 0.16); g.fillRect(x - 30, -60, w + 60, 120); g.restore();
+    // крышка
+    g.fillStyle = c([62, 62, 66], 1.15);
+    g.beginPath(); g.moveTo(...top[0]); g.lineTo(...top[1]); g.lineTo(...top[2]); g.lineTo(...top[3]); g.closePath(); g.fill();
+    g.strokeStyle = c([40, 40, 44]); g.lineWidth = 0.6;
+    for (let i = 0; i < 9; i++) {                     // решётка вентиляции у заднего края
+      const t = 0.18 + i * 0.075, a = lerp2(top[3], top[0], 0.15), b = lerp2(top[2], top[1], 0.15);
+      const p0 = lerp2(top[3], top[2], t), p1 = lerp2(a, b, t);
+      g.beginPath(); g.moveTo(...p0); g.lineTo(...p1); g.stroke();
+    }
+    // передняя панель
+    const gr = g.createLinearGradient(0, y, 0, y + h);
+    gr.addColorStop(0, c([88, 88, 94])); gr.addColorStop(0.12, c([58, 58, 63])); gr.addColorStop(1, c([36, 36, 40]));
+    g.fillStyle = gr; g.fillRect(x, y, w, h);
+    g.fillStyle = c([170, 170, 178], 1.1); g.fillRect(x, y + h * 0.1, w, 0.8);          // хромированная линия
+    // кассетоприёмник
+    const sx = x + w * 0.06, sy = y + h * 0.24, sw = w * 0.44, shh = h * 0.34;
+    g.fillStyle = c([14, 14, 16]); g.fillRect(sx, sy, sw, shh);
+    g.fillStyle = c([150, 150, 158]); g.fillRect(sx, sy, sw, 0.7);
+    g.fillStyle = c([26, 26, 30]); g.fillRect(sx + 1, sy + shh * 0.45, sw - 2, 0.6);
+    // надписи
+    g.fillStyle = c([226, 226, 230], 1.1); g.font = `bold ${h * 0.2}px "Arial Narrow", Arial, sans-serif`; g.textBaseline = 'middle';
+    g.fillText('ЛУЧ', sx, y + h * 0.79);
+    g.fillStyle = c([150, 150, 160]); g.font = `${h * 0.11}px Arial, sans-serif`;
+    g.fillText('VIDEO  HQ  4 HEAD', sx + w * 0.11, y + h * 0.8);
+    // окно табло (само светится — рисуется поверх отдельно)
+    const dx = x + w * 0.56, dy = y + h * 0.2, dw = w * 0.36, dh = h * 0.32;
+    g.fillStyle = c([10, 14, 14]); g.fillRect(dx, dy, dw, dh);
+    g.fillStyle = c([120, 120, 128]); g.fillRect(dx, dy + dh, dw, 0.5);
+    // кнопки
+    const labels = ['◀◀', '▶', '■', '▶▶', '⏏'];
+    for (let i = 0; i < 5; i++) {
+      const bx = dx + i * dw / 5 + 0.8, bw = dw / 5 - 1.6, by = y + h * 0.64, bh = h * 0.16;
+      g.fillStyle = c([176, 176, 184], 1.05); g.fillRect(bx, by, bw, bh);
+      g.fillStyle = c([90, 90, 98]); g.fillRect(bx, by + bh - 0.6, bw, 0.6);
+      g.fillStyle = c([40, 40, 44]); g.font = `${bh * 0.8}px Arial, sans-serif`; g.textAlign = 'center';
+      g.fillText(labels[i], bx + bw / 2, by + bh * 0.55); g.textAlign = 'left';
+    }
+    // кнопка питания
+    g.fillStyle = c([180, 180, 186]); g.fillRect(x + w * 0.52, y + h * 0.26, w * 0.025, h * 0.14);
+    // ножки
+    g.fillStyle = c([20, 20, 22]); g.fillRect(x + w * 0.05, y + h - 1.2, w * 0.1, 1.2); g.fillRect(x + w * 0.85, y + h - 1.2, w * 0.1, 1.2);
+  },
+  /* дорисовать корпус в картинку сцены; для дня — с учётом «старого солнца» (его потом снимет расчёт) */
+  compose(img, unit, sunImg) {
+    const E = (CFG.vcr.light[{ uDay: 'day', uEve: 'evening', uOver: 'overcast', uStorm: 'storm' }[unit]] || [0.4, 0.4, 0.4]);
+    const cv = document.createElement('canvas'); cv.width = img.naturalWidth || IMG_W; cv.height = img.naturalHeight || IMG_H;
+    const g = cv.getContext('2d'); g.drawImage(img, 0, 0, cv.width, cv.height);
+    g.save(); g.scale(cv.width / IMG_W, cv.height / IMG_H);
+    if (unit === 'uDay' && sunImg) {
+      // где на фото лежало солнце — корпус тоже в солнце: ×(1 + Lold)
+      const { front: [x, y, w, h] } = this.rects();
+      const off = document.createElement('canvas'); off.width = IMG_W; off.height = IMG_H;
+      const og = off.getContext('2d'); this.paint(og, E);
+      const sx = Math.floor(x - 40), sy = Math.floor(y - 30), sw = Math.ceil(w + 80), shh = Math.ceil(h + 50);
+      const sm = document.createElement('canvas'); sm.width = IMG_W; sm.height = IMG_H;
+      const sg = sm.getContext('2d', { willReadFrequently: true }); sg.drawImage(sunImg, 0, 0, IMG_W, IMG_H);
+      try {
+        const L = sg.getImageData(sx, sy, sw, shh).data, P = og.getImageData(sx, sy, sw, shh);
+        for (let i = 0; i < P.data.length; i += 4) {
+          if (!P.data[i + 3]) continue;
+          const v = L[i] / 255, k = Math.pow(1 + 12 * v * v, 1 / 2.2);
+          P.data[i] = Math.min(255, P.data[i] * k); P.data[i + 1] = Math.min(255, P.data[i + 1] * k); P.data[i + 2] = Math.min(255, P.data[i + 2] * k);
+        }
+        og.putImageData(P, sx, sy);
+      } catch (_) {}
+      g.drawImage(off, 0, 0);
+    } else this.paint(g, E);
+    g.restore();
+    return cv;
+  },
+  /* ---------- живые части: табло и кассета ---------- */
+  init() {
+    if (!CFG.vcr) return;
+    const { front: [x, y, w, h] } = this.rects();
+    this.r = { x, y, w, h };
+    const el = this.el = document.createElement('div'); el.className = 'vcr-live';
+    const pad = 4;
+    Object.assign(el.style, { left: (x - pad) / IMG_W * 100 + '%', top: (y - 30) / IMG_H * 100 + '%', width: (w + 2 * pad) / IMG_W * 100 + '%', height: (h + 30 + pad) / IMG_H * 100 + '%' });
+    el.innerHTML = '<canvas></canvas>';
+    stageEl.insertBefore(el, $('#glow'));
+    this.cv = el.querySelector('canvas'); this.g = this.cv.getContext('2d');
+    this.geo = { x: x - pad, y: y - 30, w: w + 2 * pad, h: h + 30 + pad };
+    this.resize(); addEventListener('resize', () => this.resize());
+    this.mode = 'clock'; this.counter = 0; this.p = 0; this.cas = 0;
+  },
+  resize() {
+    if (!this.cv) return;
+    const k = Math.min(4, state.stage.u * (devicePixelRatio || 1) * (Camera.seated ? state.zoom || 1 : 1));
+    const W = Math.round(this.geo.w * k), H = Math.round(this.geo.h * k);
+    if (this.cv.width !== W || this.cv.height !== H) { this.cv.width = W; this.cv.height = H; }
+    this.k = k; this.draw();
+  },
+  update(t) {
+    if (!this.cv) return;
+    const s = Math.floor(t / 500);
+    if (s !== this._s || this.anim) { this._s = s; this.draw(t); }
+  },
+  draw(t = nowMs()) {
+    const g = this.g, k = this.k, { x, y, w, h } = this.r; if (!g) return;
+    g.setTransform(1, 0, 0, 1, 0, 0); g.clearRect(0, 0, this.cv.width, this.cv.height);
+    g.setTransform(k, 0, 0, k, -this.geo.x * k, -this.geo.y * k);
+    // табло: зелёно-голубые люминесцентные цифры
+    const dx = x + w * 0.56, dy = y + h * 0.2, dw = w * 0.36, dh = h * 0.32;
+    const n = new Date(); let txt;
+    if (this.mode === 'load') txt = 'LOAD';
+    else if (this.mode === 'eject') txt = 'EJECT';
+    else if (this.mode === 'play') { const c = Math.floor(this.counter + (t - this.t0) / 1000); txt = `▶ ${Math.floor(c / 3600)}:${String(Math.floor(c / 60) % 60).padStart(2, '0')}:${String(c % 60).padStart(2, '0')}`; }
+    else txt = (n.getSeconds() % 2 ? `${String(n.getHours()).padStart(2, '0')}:${String(n.getMinutes()).padStart(2, '0')}` : `${String(n.getHours()).padStart(2, '0')} ${String(n.getMinutes()).padStart(2, '0')}`);
+    const dim = state.mode === 'night' || state.mode === 'evening' ? 1 : 0.8;
+    g.save(); g.beginPath(); g.rect(dx, dy, dw, dh); g.clip();
+    g.font = `bold ${dh * 0.72}px "Press Start 2P", monospace`; g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.shadowColor = `rgba(90,255,230,${0.9 * dim})`; g.shadowBlur = 3 * k;
+    g.fillStyle = `rgba(150,255,235,${0.92 * dim})`; g.fillText(txt, dx + dw / 2, dy + dh / 2 + 0.3);
+    g.restore();
+    // кассета: в щели виден её торец с наклейкой; пока не задвинута — торчит из щели к нам
+    if (this.cas > 0.001) {
+      const sx = x + w * 0.06, sy = y + h * 0.24, sw = w * 0.44, shh = h * 0.34, p = this.p;
+      const L = Radio.light ? Radio.light.c : [0.4, 0.4, 0.4];
+      const lc = (rgb, kk = 1.6) => `rgb(${rgb.map((v, i) => clamp(Math.round(v * L[i] * kk), 0, 255)).join(',')})`;
+      g.save(); g.globalAlpha = this.cas;
+      const ex = p * 7, cx0 = sx + sw * 0.05, cw = sw * 0.9;
+      g.fillStyle = lc([30, 30, 33]); g.fillRect(cx0 - ex * 0.15, sy + shh * 0.12, cw + ex * 0.3, shh * 0.76 + ex);          // корпус кассеты
+      g.fillStyle = lc([70, 70, 76]); g.fillRect(cx0 - ex * 0.15, sy + shh * 0.12, cw + ex * 0.3, Math.max(0.6, ex * 0.35)); // верхняя грань
+      g.fillStyle = lc([236, 230, 206]); g.fillRect(cx0 + cw * 0.18, sy + shh * 0.3 + ex * 0.4, cw * 0.64, shh * 0.34);    // наклейка
+      g.fillStyle = lc([60, 50, 160]); g.font = `${shh * 0.26}px "Neucha", sans-serif`; g.textAlign = 'center'; g.textBaseline = 'middle';
+      g.fillText('ЭФИР-95', cx0 + cw / 2, sy + shh * 0.47 + ex * 0.4);
+      g.restore();
+    }
+  },
+  label() { return this.loaded ? 'Видеомагнитофон: идёт кассета. Щёлкните — достать' : 'Видеомагнитофон. Щёлкните — вставить кассету'; },
+  async click() {
+    await Sound.start();
+    if (this.busy) return; this.busy = true;
+    const mech = (t, f, d, v) => Sound.burst(t, { dur: d, vol: v, type: 'bandpass', f, q: 1.5, dest: Sound.sfx, pan: -0.05 });
+    if (!this.loaded) {
+      // вставляем: кассета торчит из щели → её затягивает, щелчок, мотор; табло LOAD → ▶
+      this.mode = 'load'; this.cas = 1; this.p = 1; this.draw();
+      if (Sound.started) { const t = Sound.ctx.currentTime; mech(t + 0.05, 900, 0.06, 0.3); mech(t + 0.3, 300, 0.8, 0.08); mech(t + 1.15, 1400, 0.05, 0.22); }
+      await this.tween('p', 1, 0, 1000);
+      await wait(700);
+      this.loaded = true; this.mode = 'play'; this.cas = 0; this.t0 = nowMs(); this.counter = Math.floor(rand(60, 2400)); this.draw();   // шторка щели закрылась
+      const vi = CFG.channels.findIndex(c => c.type === 'vcr');
+      if (!TV.on) { TV.powerOn(); if (vi >= 0) setTimeout(() => TV.setChannel(vi), CFG.tv.powerOnMs + 200); }
+      else if (vi >= 0) { if (TV.ch !== vi) TV.setChannel(vi); else { TV.activateVideo(false); TV.activateVideo(true); } }
+    } else {
+      this.mode = 'eject'; this.loaded = false; this.cas = 1; this.p = 0; this.draw();
+      if (Sound.started) { const t = Sound.ctx.currentTime; mech(t, 300, 0.6, 0.08); mech(t + 0.7, 1100, 0.06, 0.25); }
+      if (TV.channel().type === 'vcr') { TV.activateVideo(false); TV.activateVideo(true); }
+      await this.tween('p', 0, 1, 800);
+      await wait(1100);
+      await this.tween('cas', 1, 0, 400);                    // кассету забрали
+      this.mode = 'clock'; this.p = 0; this.draw();
+    }
+    this.busy = false;
+    Zones.refreshLabels();
+  },
+  tween(key, a, b, ms) {
+    return new Promise(res => {
+      const t0 = nowMs(); this.anim = true;
+      const st = () => { const k = clamp((nowMs() - t0) / ms, 0, 1), e = k * k * (3 - 2 * k); this[key] = lerp(a, b, e); this.draw(); if (k < 1) requestAnimationFrame(st); else { this.anim = false; res(); } };
+      requestAnimationFrame(st);
+    });
+  },
+};
+const lerp2 = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+
 /* ---------- микро-эффекты ---------- */
 const FX = {
   wrap: $('#fx'),
@@ -4035,6 +4550,8 @@ function init() {
   Zones.init();
   Puppets.init();
   Radio.init();
+  Props.init();
+  VCR.init();
   UI.init();
   applyScene(true);
   layout();
@@ -4103,11 +4620,13 @@ function init() {
     Dust.update(t, dt);
     Weather.update(t, dt);
     Radio.update(t);
+    Props.update(t);
+    VCR.update(t);
     requestAnimationFrame(frame);
   };
   requestAnimationFrame(frame);
 
-  window.TubeTV = { GLRoom, BG, TV, Sound, Events, setMode, setWeather, Calib, Puppets, Camera, Embed, Wind, Weather, Radio, state, CFG };   // для отладки из консоли
+  window.TubeTV = { GLRoom, BG, TV, Sound, Events, setMode, setWeather, Calib, Puppets, Camera, Embed, Wind, Weather, Radio, Props, VCR, state, CFG };   // для отладки из консоли
 }
 
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();

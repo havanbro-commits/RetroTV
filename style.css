@@ -527,3 +527,30 @@ body.reduced .grain { display: none; }
 .radio-pt.on .radio-glow { opacity: .55; }
 body.evening .radio-pt.on .radio-glow, body.weather-downpour .radio-pt.on .radio-glow { opacity: 1; }
 .hot.radio .halo { border-radius: 6px; }
+
+/* ---------- будильник и календарь ---------- */
+.prop { position: absolute; pointer-events: none; }
+.prop canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.prop .cal-sheet { transform-origin: 50% 20%; will-change: transform, opacity; }
+
+/* ---------- видеомагнитофон ---------- */
+.vcr-live { position: absolute; pointer-events: none; }
+.vcr-live canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+/* «как с кассеты»: дрожание строк, полоса трекинга, размытый цвет и надпись PLAY */
+.tv-embed .vhs-track, .tv-embed .vhs-osd { display: none; }
+.tv-embed.vhs .vhs-track {
+  display: block; left: 0; right: 0; top: auto; height: 9%; bottom: -12%;
+  background: linear-gradient(to bottom, rgba(255,255,255,0), rgba(255,255,255,.22) 40%, rgba(0,0,0,.25) 55%, rgba(255,255,255,0));
+  mix-blend-mode: screen; animation: vhsTrack 7s linear infinite; opacity: .8;
+}
+@keyframes vhsTrack { 0% { transform: translateY(0); } 70% { transform: translateY(0); } 100% { transform: translateY(-1250%); } }
+.tv-embed.vhs iframe { animation: vhsJitter 3.3s steps(1) infinite; }
+@keyframes vhsJitter {
+  0%, 100% { margin-left: 0; } 23% { margin-left: .6px; } 24% { margin-left: 0; } 61% { margin-left: -.5px; } 62% { margin-left: 0; } 88% { margin-left: .8px; } 89% { margin-left: 0; }
+}
+.tv-embed.vhs .vhs-osd {
+  display: block; inset: auto auto 10% 8%; color: #f4f4f4; font: calc(var(--u) * 7) / 1 "Press Start 2P", monospace;
+  text-shadow: 0 0 2px #fff, 1px 1px 0 #000; opacity: 0; animation: vhsOsd 4s ease-out 1;
+}
+.tv-embed.vhs.revealed .vhs-osd { animation: vhsOsd 4s ease-out 1; }
+@keyframes vhsOsd { 0%, 70% { opacity: .9; } 100% { opacity: 0; } }

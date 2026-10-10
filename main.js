@@ -35,7 +35,6 @@ const state = {
   vent: (() => { try { const v = parseFloat(localStorage.getItem('tubetv.vent')); if (v >= 0 && v <= 1) return v; } catch (_) {} return CFG.audio.windowLevels[CFG.audio.windowStart]; })(),
   tvVolume: CFG.tv.defaultVolume,
   headphones: (() => { try { const v = localStorage.getItem('tubetv.phones'); if (v === '0' || v === '1') return v === '1'; } catch (_) {} return CFG.audio.headphones !== false; })(),
-  radioVolume: (() => { try { const v = parseFloat(localStorage.getItem('tubetv.radio')); if (v >= 0 && v <= 1) return v; } catch (_) {} return CFG.radio ? CFG.radio.volume : 0.7; })(),
   calibrating: false,
   firstOnDone: false,
   stage: { left: 0, top: 0, w: 1, h: 1, u: 1 },
@@ -102,8 +101,8 @@ const Camera = {
     const w = CFG.zones.window, st = state.stage;
     this.winHidden = this.seated && (t.x + (w.x / 100) * st.w * t.k > innerWidth || t.y + ((w.y + w.h) / 100) * st.h * t.k < 0);
     clearTimeout(this._t);
-    if (animate) this._t = setTimeout(() => { stageEl.classList.remove('moving'); TV.resize(); Radio.resize(); Props.resize(); VCR.resize(); }, CFG.seat.durationMs + 60);
-    else { TV.resize(); Radio.resize(); Props.clock && Props.resize(); VCR.cv && VCR.resize(); }
+    if (animate) this._t = setTimeout(() => { stageEl.classList.remove('moving'); TV.resize(); }, CFG.seat.durationMs + 60);
+    else TV.resize();
   },
   toggle(on = !this.seated) {
     if (on === this.seated) return;
@@ -112,7 +111,43 @@ const Camera = {
     if (Sound.started) Sound.seat(on);
     if (on) { stageEl.classList.remove('letterbox-y', 'letterbox-x'); BG.loadHires(); this.apply(true); }
     else { this.apply(true); setTimeout(layout, CFG.seat.durationMs + 80); }
+    Zones.apply();
     UI.seatLabel();
+  },
+};
+
+
+/* Крупный план «сесть перед телевизором»: отдельная подробная картинка в каждой сцене.
+   Лежит в комнате так, что её кинескоп совпадает с экраном комнаты пиксель в пиксель —
+   поэтому экран, помехи и свечение остаются на своих местах, а вокруг проявляется деталь. */
+const Close = {
+  imgs: {},
+  map() {
+    const C = CFG.closeup, sx = C.room.a / C.glass.a, sy = C.room.b / C.glass.b;
+    return { sx, sy, x0: C.room.cx - C.glass.cx * sx, y0: C.room.cy - C.glass.cy * sy };
+  },
+  /* точка крупного плана → пиксели комнаты */
+  toRoom(X, Y) { const m = this.map(); return [m.x0 + X * m.sx, m.y0 + Y * m.sy]; },
+  build() {
+    const C = CFG.closeup, m = this.map(), w = document.createElement('div');
+    w.className = 'close-wrap'; w.setAttribute('aria-hidden', 'true');
+    Object.assign(w.style, { left: m.x0 / IMG_W * 100 + '%', top: m.y0 / IMG_H * 100 + '%',
+      width: C.size[0] * m.sx / IMG_W * 100 + '%', height: C.size[1] * m.sy / IMG_H * 100 + '%' });
+    this.wrap = w;
+    return w;
+  },
+  addScene(scene) {
+    const im = new Image(); im.alt = ''; im.decoding = 'async'; im.draggable = false;
+    im.dataset.src = CFG.closeup.images[scene]; im.dataset.scene = scene;
+    im.addEventListener('load', () => im.classList.add('loaded'));
+    this.wrap.appendChild(im); this.imgs[scene] = im;
+  },
+  load() { for (const im of Object.values(this.imgs)) if (!im.src) im.src = im.dataset.src; },
+  show(scene) {
+    this.scene = scene;
+    for (const [s, im] of Object.entries(this.imgs)) im.classList.toggle('on', s === scene);
+    if (Camera.seated) { const im = this.imgs[scene]; if (im && !im.src) im.src = im.dataset.src; }
+    Zones.apply();
   },
 };
 
@@ -250,6 +285,8 @@ uniform float uNight;       // ночь
 uniform vec4 uWin;          // окно: x0, y0, x1, y1 (px)
 uniform vec3 uAmb, uSunC, uWinC, uLamp;
 uniform float uPhys, uSunK, uShaftK, uAmp, uBillow, uPhase, uRain, uSlant;
+uniform float uGlow, uRtx, uLampL;   // свечение фосфорного оленя, «трассировка» в хрустале, торшер
+uniform vec3 uTvC;                   // свет экрана (линейный цвет × яркость)
 ${this.glsl()}
 float laceAt(vec2 uv, float lod){
 ${lodExt ? '  return texture2DLodEXT(uLace, uv, lod).r;' : '  return texture2D(uLace, uv, lod - 2.0).r;'}
@@ -289,6 +326,66 @@ float throughWindow(vec3 P, vec3 N, vec3 s, float detail){
   return cosT * ap * T * (1.0 - occ);
 }
 
+/* «RTX»: свет от светящейся статуэтки (и от экрана, и от торшера) проходит сквозь хрусталь.
+   Хрусталь — маска из фото (g), нормаль грани — градиент яркости; каждый канал
+   преломляется чуть по-своему (дисперсия), сквозь бокалы на заднюю стенку падают каустики. */
+const vec2 DEER = vec2(405.0, 338.0), TVP = vec2(728.0, 446.0), LAMPP = vec2(165.0, 300.0);
+const vec3 PHOS = vec3(0.30, 1.0, 0.42);
+vec2 edgeN(vec2 uq){
+  vec2 e = 1.0 / uImg;
+  float lx = dot(texture2D(uStorm, uq + vec2(e.x, 0.0)).rgb - texture2D(uStorm, uq - vec2(e.x, 0.0)).rgb, vec3(0.333));
+  float ly = dot(texture2D(uStorm, uq + vec2(0.0, e.y)).rgb - texture2D(uStorm, uq - vec2(0.0, e.y)).rgb, vec3(0.333));
+  return vec2(lx, ly);
+}
+vec3 glints(vec2 p, vec2 uq, float crys, vec2 L, float reach, vec2 gN){
+  vec2 toL = L - p; float d = length(toL); vec2 dir = toL / max(d, 1.0);
+  float gl = length(gN);
+  float facing = gl > 0.002 ? abs(dot(gN / gl, dir)) : 0.0;
+  float fall = 1.0 / (1.0 + d * d / (reach * reach));
+  // стеклянные полки между источником и бокалом гасят часть света
+  float shelves = abs(floor((p.y - 266.0) / 105.0) - floor((L.y - 266.0) / 105.0));
+  fall *= pow(0.55, min(shelves, 3.0));
+  vec2 e = dir / uImg * 1.6;
+  vec3 cm = vec3(texture2D(uGeo, uq - e).g, crys, texture2D(uGeo, uq + e).g);   // призма: R и B со сдвигом
+  cm = cm * cm;
+  float tw = 0.65 + 0.35 * sin(uTime * 1.7 + p.x * 0.37 + p.y * 0.21) * sin(uTime * 0.6 + p.y * 0.13);
+  return cm * pow(facing, 4.0) * fall * tw * smoothstep(0.004, 0.04, gl);
+}
+vec3 crystal(vec3 c, vec2 p, vec2 uq, vec4 gx, float gid){
+  vec3 alb = lin(texture2D(uStorm, uq).rgb);
+  float al = dot(alb, vec3(0.2126, 0.7152, 0.0722));
+  vec2 dp = (p - DEER) / vec2(40.0, 46.0);
+  float r2 = dot(dp, dp);
+  float g = uGlow;
+  // сама статуэтка: холодный зелёный фосфор, еле заметный; рельеф виден — толще слой, ярче
+  c += PHOS * gx.b * g * (0.0075 + 0.003 * uRtx) * (0.35 + 6.0 * al);
+  // ореол в стекле витрины и свет на соседних предметах
+  float near = 1.0 / (1.0 + r2 * 2.6);
+  bool cab = gid > 3.5 && gid < 4.5;
+  c += PHOS * g * exp(-r2 * 1.8) * 0.0016 * (1.0 + 1.2 * uRtx);
+  if (cab) c += alb * PHOS * g * near * (0.05 + 0.08 * uRtx);
+  if (uRtx > 0.001) {
+    float crys = gx.g;
+    vec2 gN = crys > 0.05 ? edgeN(uq) : vec2(0.0);
+    vec3 add = vec3(0.0);
+    if (crys > 0.05) {
+      add += glints(p, uq, crys, DEER, 105.0, gN) * PHOS * g * 0.15;
+      add += glints(p, uq, crys, TVP, 480.0, gN) * uTvC * 0.22;
+      add += glints(p, uq, crys, LAMPP, 360.0, gN) * vec3(1.0, 0.72, 0.42) * uLampL * 0.035;
+    } else if (cab && g > 0.01) {
+      // каустики: свет оленя прошёл сквозь хрусталь на пути к этой точке
+      vec2 toL = DEER - p; float d = length(toL);
+      float acc = 0.0;
+      for (int i = 1; i <= 8; i++) { float k = float(i) / 9.0; acc += texture2D(uGeo, (p + toL * k) / uImg).g * (1.0 - k * 0.5); }
+      acc = acc / 6.0;
+      float ca = acc * acc * (0.6 + 0.4 * sin(uTime * 0.9 + d * 0.11));
+      add += alb * PHOS * g * ca * (1.0 / (1.0 + d * d / 7000.0)) * 1.2;
+    }
+    c += add * uRtx;
+  }
+  return c;
+}
+
 void main(){
   vec2 p = v * uImg;
   // ---- тюль ----
@@ -313,7 +410,9 @@ void main(){
   float winM = smoothstep(uWin.x - 6.0, uWin.x + 10.0, p.x) * (1.0 - smoothstep(uWin.w - 10.0, uWin.w + 6.0, p.y));
   vec3 col = vec3(0.0);
   vec3 P, N;
-  bool room = roomPoint(p, floor(texture2D(uGeo, v).r * 255.0 / 20.0 + 0.5), P, N);
+  vec4 gx = texture2D(uGeo, v);               // r — номер плоскости, g — хрусталь, b — олень
+  float gid = floor(gx.r * 255.0 / 20.0 + 0.5);
+  bool room = roomPoint(p, gid, P, N);
   // ---- день и закат: снимаем «старое» солнце с фотографии и кладём рассчитанное ----
   if (uW.x > 0.001) {
     float Lold = sunAt(q);
@@ -356,6 +455,8 @@ void main(){
     col += uNight * gam(c);
   }
   col *= shade;
+  // ---- фосфорный олень в серванте и хрусталь вокруг ----
+  if (uGlow > 0.002 || (uRtx > 0.001 && (dot(uTvC, vec3(1.0)) > 0.002 || uLampL > 0.01))) col = gam(crystal(lin(col), p, uq, gx, gid));
   if (uRain > 0.001) {
     float lumc = dot(col, vec3(0.299, 0.587, 0.114));
     float r = rainLayer(p, 9.0, 260.0, 1.9, 1.0) * 0.55 + rainLayer(p + 37.0, 6.0, 170.0, 2.6, 7.0) * 0.35 + rainLayer(p + 71.0, 14.0, 380.0, 1.4, 13.0) * 0.6;
@@ -410,7 +511,7 @@ void main(){
     gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
     const U = (prog, names) => { const o = {}; for (const n of names) o[n] = gl.getUniformLocation(prog, n); return o; };
     this.u = U(this.prog, ['uDayP', 'uHole', 'uDay', 'uEve', 'uOver', 'uStorm', 'uSun', 'uGeo', 'uLace', 'uShaft', 'uW', 'uNight', 'uImg', 'uWin', 'uAmb', 'uSunC', 'uWinC', 'uLamp',
-      'uPhys', 'uSunK', 'uShaftK', 'uSunD', 'uGust', 'uAmp', 'uBillow', 'uPhase', 'uTime', 'uRain', 'uSlant']);
+      'uPhys', 'uSunK', 'uShaftK', 'uSunD', 'uGust', 'uAmp', 'uBillow', 'uPhase', 'uTime', 'uRain', 'uSlant', 'uGlow', 'uRtx', 'uLampL', 'uTvC']);
     this.uS = U(this.progS, ['uGeo', 'uImg', 'uTime', 'uSunD', 'uGust']);
     gl.useProgram(this.progS); gl.uniform2f(this.uS.uImg, IMG_W, IMG_H); gl.uniform1i(this.uS.uGeo, 5);
     gl.useProgram(this.prog); gl.uniform2f(this.u.uImg, IMG_W, IMG_H);
@@ -456,25 +557,16 @@ void main(){
     const cur = BG.current; BG.current = null; BG.show(cur || state.scene, true);
   },
   /* какие текстуры нужны сцене */
-  unitsFor(scene) { return { day: ['uDay', 'uSun'], sunset: ['uDay', 'uSun', 'uGeo', 'uLace'], evening: ['uEve'], overcast: ['uOver'], storm: ['uStorm'], night: ['uStorm', 'uGeo', 'uLace'] }[scene] || []; },
+  unitsFor(scene) { return { day: ['uDay', 'uSun', 'uGeo'], sunset: ['uDay', 'uSun', 'uGeo', 'uLace'], evening: ['uEve', 'uStorm', 'uGeo'], overcast: ['uOver', 'uStorm', 'uGeo'], storm: ['uStorm', 'uGeo'], night: ['uStorm', 'uGeo', 'uLace'] }[scene] || []; },
   loadUnit(k) {
     if (this.loading[k]) return this.loading[k];
     const gl = this.gl, i = this.units.indexOf(k), src = this.srcs[k];
     this.imgs = this.imgs || {};
-    const scene = ['uDay', 'uEve', 'uOver', 'uStorm'].includes(k) && CFG.vcr;
     return (this.loading[k] = new Promise((res, rej) => {
       const im = new Image(); im.decoding = 'async';
       im.onload = () => {
         const up = async () => {
-          let src = im;
-          if (scene) {                                  // видеомагнитофон дорисовывается в саму сцену
-            try {
-              if (k === 'uDay') { await this.loadUnit('uSun').catch(() => {}); }
-              const sc = { uDay: 'day', uEve: 'evening', uOver: 'overcast', uStorm: 'storm' }[k];
-              const plate = await new Promise(r => { const pl = new Image(); pl.onload = () => r(pl); pl.onerror = () => r(null); pl.src = `assets/eggs/sachet-plate-${sc}.png`; });
-              src = VCR.compose(im, k, this.imgs.uSun, plate);
-            } catch (e) { console.warn('[Tube TV] видик:', e); src = im; }
-          }
+          const src = im;
           this.imgs[k] = im;
           if (k === 'uDay' && this.holeOK) this.buildPlates(src);
           gl.activeTexture(gl.TEXTURE0 + i); gl.bindTexture(gl.TEXTURE_2D, this.tex[k]);
@@ -615,7 +707,9 @@ void main(){
     if (!this.ok) return;
     const gl = this.gl, u = this.u, c = this.cur;
     const phys = c.w[0] > 0.001 && c.s > 0.001, night = c.n > 0.001;
-    const live = phys || night;                      // свет из окна живой: тюль и листва шевелятся
+    const glow = Deer.level(c), rtx = Deer.rtxK(t), tvc = Deer.tvLight();
+    const sparkle = rtx > 0.001 && (glow > 0.01 || tvc[0] + tvc[1] + tvc[2] > 0.002 || c.w[1] > 0.05);
+    const live = phys || night || sparkle;           // свет живой: тюль, листва, блики в хрустале
     const full = this.dirty || this.busy();
     if (!full) {
       if (Camera.winHidden && !stageEl.classList.contains('moving') && !live) return;
@@ -653,6 +747,7 @@ void main(){
     gl.uniform1f(u.uPhase, this.wind.phase);
     gl.uniform1f(u.uTime, time);
     gl.uniform1f(u.uRain, Weather.level || 0);
+    gl.uniform1f(u.uGlow, glow); gl.uniform1f(u.uRtx, rtx); gl.uniform1f(u.uLampL, c.w[1]); gl.uniform3fv(u.uTvC, tvc);
     gl.uniform1f(u.uSlant, 0.12 + Wind.w * 0.25);
     const W = this.c.width, H = this.c.height, kx = W / IMG_W;
     gl.viewport(0, 0, W, H);
@@ -676,14 +771,9 @@ const BG = {
       const img = new Image();
       img.dataset.src = def.image; img.alt = ''; img.decoding = 'async'; img.draggable = false;   // src — только когда сцена понадобится
       layer.appendChild(img);
-      if (CFG.hires && CFG.hires.images[scene]) {
-        if (!this.hiresWrap) { this.hiresWrap = document.createElement('div'); this.hiresWrap.className = 'hires-wrap'; }
-        const hr = new Image(); hr.className = 'hires'; hr.alt = ''; hr.decoding = 'async';
-        hr.dataset.src = CFG.hires.images[scene]; hr.dataset.scene = scene;
-        const [x, y, w, h] = CFG.hires.box;
-        Object.assign(hr.style, { left: x / IMG_W * 100 + '%', top: y / IMG_H * 100 + '%', width: w / IMG_W * 100 + '%', height: h / IMG_H * 100 + '%' });
-        hr.addEventListener('load', () => hr.classList.add('loaded'));
-        this.hiresWrap.appendChild(hr);
+      if (CFG.closeup && CFG.closeup.images[scene]) {
+        if (!this.closeWrap) this.closeWrap = Close.build();
+        Close.addScene(scene);
       }
       if (def.video) {
         const v = this.video(def.video, def.image);
@@ -700,13 +790,13 @@ const BG = {
       const b = document.createElement('div'); b.className = 'bd'; b.dataset.src = def.image; b.style.opacity = 0;
       bd.appendChild(b); this.bds[scene] = b;
     }
-    if (this.hiresWrap) bg.appendChild(this.hiresWrap);
+    if (this.closeWrap) bg.appendChild(this.closeWrap);
   },
   /* WebGL-комната готова: прячем картинки, выключаем SVG-фильтры */
   enableGL() {
     this.gl = true;
     const bg = $('#bg');
-    bg.insertBefore(GLRoom.c, this.hiresWrap || null);
+    bg.insertBefore(GLRoom.c, this.closeWrap || null);
     for (const l of Object.values(this.layers)) { const s = l.querySelector('svg.sway'); if (s) s.remove(); }
     GLRoom.go(state.scene, true);
     requestAnimationFrame(() => { GLRoom.c.classList.add('on'); setTimeout(() => bg.classList.add('gl'), 700); requestAnimationFrame(() => Boot.done()); });
@@ -723,7 +813,7 @@ const BG = {
   show(scene, instant) {
     if (this.current === scene || !this.layers[scene]) return;
     this.current = scene;
-    if (this.hiresWrap) for (const h of this.hiresWrap.children) h.classList.toggle('on', h.dataset.scene === scene);
+    Close.show(scene);
     if (this.gl) GLRoom.go(scene, instant);
     this.load(scene);
     const z = ++this.z;
@@ -749,9 +839,7 @@ const BG = {
     if (si) { si.setAttribute('href', si.dataset.href); si.setAttributeNS('http://www.w3.org/1999/xlink', 'xlink:href', si.dataset.href); si.removeAttribute('data-href'); }
   },
   preloadAll() { for (const s of Object.keys(this.layers)) this.load(s); },
-  loadHires() {
-    if (this.hiresWrap) for (const h of this.hiresWrap.children) if (!h.src) h.src = h.dataset.src;
-  },
+  loadHires() { Close.load(); },
 
   /* Карта смещения. R — волны по горизонтали, G — подъём подола на порывах.
      Ширина карты кратна периоду, поэтому бегущая волна зацикливается без шва. */
@@ -907,7 +995,6 @@ function applyScene(instant) {
   state.fxFrom = Object.assign({}, state.fx || sceneFx()); state.fxTo = sceneFx(); state.fxT0 = instant ? 0 : nowMs();
   if (instant) state.fx = Object.assign({}, state.fxTo);
   Puppets.setMode && Puppets.items && Puppets.setMode(state.scene);
-  Radio.setScene(state.scene);
   Sound.setScene();
   Weather.set(state.weather);
   Dust.setScene();
@@ -1027,7 +1114,7 @@ const TV = {
   },
 
   resize() {
-    placeEl(this.el, CFG.zones.screen); Embed.resize();
+    placeEl(this.el, CFG.zones.screen); Feed.resize();
     const z = zpx(CFG.zones.screen), u = state.stage.u * (state.zoom || 1);
     const dpr = Math.min(devicePixelRatio || 1, 2);
     const w = Math.max(2, Math.round(z.w * u * dpr)), h = Math.max(2, Math.round(z.h * u * dpr));
@@ -1091,57 +1178,19 @@ const TV = {
     if (this.on) { Sound.startChannel(this.channel()); this.activateVideo(true); }
   },
 
-  /* ---- видео-каналы: плейлист, новый ролик при каждом переключении ---- */
-  clips(ch) { return ch.playlist && ch.playlist.length ? ch.playlist : (ch.src ? [ch.src] : []); },
-  nextClip(ch) {
-    const list = this.clips(ch); ch._bad = ch._bad || new Set();
-    const ok = list.filter(s => !ch._bad.has(s));
-    if (!ok.length) return null;
-    let pick;
-    if (ch.order === 'shuffle') { do pick = pick2(ok); while (ok.length > 1 && pick === ch._cur); }
-    else { const i = list.indexOf(ch._cur); for (let k = 1; k <= list.length; k++) { const c = list[(i + k) % list.length]; if (!ch._bad.has(c)) { pick = c; break; } } }
-    ch._cur = pick;
-    return pick;
-  },
-  getVideo(ch) {
-    if (ch._video) return ch._video;
-    const v = document.createElement('video');
-    v.playsInline = true; v.preload = 'auto'; v.setAttribute('playsinline', '');
-    ch._ok = false;
-    v.addEventListener('loadedmetadata', () => {
-      if (ch.live && isFinite(v.duration) && v.duration > 4) v.currentTime = (Date.now() / 1000) % (v.duration - 2);
-    });
-    v.addEventListener('loadeddata', () => { ch._ok = true; });
-    v.addEventListener('ended', () => { if (this.on && this.channel() === ch) this.loadClip(ch); });
-    v.addEventListener('error', () => {
-      ch._ok = false;
-      if (ch._cur) ch._bad.add(ch._cur);
-      if (this.on && this.channel() === ch && this.clips(ch).some(s => !ch._bad.has(s))) this.loadClip(ch);
-    });
-    ch._video = v;
-    return v;
-  },
-  loadClip(ch) {
-    const v = this.getVideo(ch), src = this.nextClip(ch);
-    if (!src) { ch._ok = false; return; }
-    ch._ok = false;
-    v.loop = this.clips(ch).length === 1;
-    v.src = src;
-    Sound.routeVideo(ch, v);
-    v.play().catch(() => {});
-    this.burstUntil = nowMs() + CFG.tv.staticBurstMs;
-  },
+  /* ---- видео-каналы: свой плеер (архив, файлы) и RuTube ---- */
+  isFeed(ch) { return !!ch && (ch.type === 'archive' || ch.type === 'video' || ch.type === 'rutube'); },
   activateVideo(on) {
     const ch = this.channel();
-    if (ch && ch.type === 'youtube') { if (on && this.on) Embed.play(ch); else Embed.stop(); return; }
-    if (ch && ch.type === 'vcr') {                       // видео с кассеты: только если кассета в видике
-      Embed.el.classList.toggle('vhs', on && this.on && VCR.loaded);
-      if (on && this.on && VCR.loaded) Embed.play(ch); else Embed.stop();
-      return;
-    }
-    if (!ch || ch.type !== 'video') return;
-    if (on && this.on) this.loadClip(ch);
-    else if (ch._video) ch._video.pause();
+    if (on && this.on && this.isFeed(ch)) Feed.play(ch); else Feed.stop();
+  },
+  /* кадр видео на «эфир»: 16:9 — с полосами, как на настоящем 4:3; чуть шире краёв, как у кинескопа */
+  drawVideo(g, W, H, v) {
+    const ar = (v.videoWidth / v.videoHeight) || 4 / 3, os = 1.035;
+    g.fillStyle = '#000'; g.fillRect(0, 0, W, H);
+    let w = W * os, h = H * os;
+    if (ar > W / H + 0.05) h = w / ar; else if (ar < W / H - 0.05) w = h * ar;
+    g.drawImage(v, (W - w) / 2, (H - h) / 2, w, h);
   },
 
   /* ---- отрисовка эфира ---- */
@@ -1151,23 +1200,11 @@ const TV = {
     switch (ch.type) {
       case 'testcard': Channels.testcard(g, W, H, sec, ch); break;
       case 'morning':  Channels.morning(g, W, H, sec, ch); break;
-      case 'video': {
-        const v = ch._video;
-        if (v && ch._ok && v.readyState >= 2) {
-          const ar = (v.videoWidth / v.videoHeight) || 4 / 3;
-          if (ar > W / H + 0.05) { const h = W / ar; g.fillStyle = '#000'; g.fillRect(0, 0, W, H); g.drawImage(v, 0, (H - h) / 2, W, h); }
-          else g.drawImage(v, 0, 0, W, H);
-        }
-        else Channels.noVideo(g, W, H, sec, ch, this.ch + 1);
-        break;
-      }
-      case 'vcr':
-        if (!VCR.loaded) { Channels.avBlue(g, W, H, sec); break; }
-        // fallthrough — кассета играет, как YouTube-канал
-      case 'youtube': {
-        if (Embed.failed) { Channels.noVideo(g, W, H, sec, ch, this.ch + 1, Embed.msg); break; }
-        g.fillStyle = '#000'; g.fillRect(0, 0, W, H);
-        const txt = Embed.screenText();
+      case 'archive': case 'video': case 'rutube': {
+        if (Feed.failed) { Channels.noVideo(g, W, H, sec, ch, this.ch + 1, Feed.msg); break; }
+        if (Feed.inShader()) this.drawVideo(g, W, H, Feed.v);
+        else { g.fillStyle = '#000'; g.fillRect(0, 0, W, H); }
+        const txt = Feed.screenText();
         if (txt) Channels.tuning(g, W, H, sec, ch, txt);
         break;
       }
@@ -1178,11 +1215,11 @@ const TV = {
 
   render(t) {
     const s = this.shape(t);
-    Embed.shape(s);
+    Feed.shape(s);
     if (!s) { this.level = 0; return; }
     const ch = this.channel();
     const burst = clamp((this.burstUntil - t) / CFG.tv.staticBurstMs, 0, 1);
-    const st = Math.max(ch.type === 'static' ? 1 : 0, burst, s.st);
+    const st = Math.max(ch.type === 'static' ? 1 : 0, burst, s.st, this.isFeed(ch) ? Feed.noise() : 0);
     if (s.sx * s.sy > 0) this.drawContent(t);
 
     if (t - this.lastSample > 110) { this.lastSample = t; this.sampleAvg(st); }
@@ -1200,8 +1237,7 @@ const TV = {
       gl.uniform1f(u.uFlicker, REDUCED ? 0 : 1);
       gl.uniform1f(u.uCurv, CFG.screen.curvature);
       gl.uniform1f(u.uScan, Math.min(240, H / 2.6));
-      const yt = (ch.type === 'youtube' || ch.type === 'vcr') && Embed.showing();
-      gl.uniform1f(u.uGrain, (REDUCED ? 0.02 : 0.07) * (yt ? CFG.embed.crt : 1));
+      gl.uniform1f(u.uGrain, (REDUCED ? 0.02 : 0.07) * (this.isFeed(ch) && Feed.showing() ? CFG.embed.crt : 1));
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     } else if (this.c2d) {
       const c = this.c2d, W = this.canvas.width, H = this.canvas.height;
@@ -1220,7 +1256,7 @@ const TV = {
   /* Средний цвет экрана — для свечения на стене */
   sampleAvg(st) {
     let r = 0.6, g = 0.62, b = 0.68;
-    if ((this.channel().type === 'youtube' || this.channel().type === 'vcr') && Embed.showing()) {          // пиксели плеера недоступны — «живое» голубое мерцание
+    if (this.isFeed(this.channel()) && Feed.showing()) {          // пиксели чужого плеера недоступны — «живое» голубое мерцание
       const k = nowMs() / 1000;
       const v = 0.45 + 0.25 * Math.sin(k * 1.3) * Math.sin(k * 0.37) + 0.1 * Math.random();
       this.avg = [v * 0.85, v * 0.92, v * 1.05]; this.avgLum = v; return;
@@ -1413,17 +1449,26 @@ const Channels = {
 };
 
 /* ==========================================================================
-   3b. ВСТРОЕННОЕ ВИДЕО (YouTube): официальный плеер под стеклом кинескопа.
-   Пиксели чужого плеера браузер не даёт обработать шейдером, поэтому
-   «кинескоп» здесь собран из накладок: строки, теневая маска, виньетка,
-   отражение комнаты в стекле, мерцание. Включение/выключение и помехи при
-   переключении — те же, что у остальных каналов (их рисует WebGL поверх).
+   3b. ЭФИР. Видео идёт через свой плеер, а не через чужой:
+   - archive / video — файлы (Internet Archive или свои) играют в <video>, кадры
+     рисует шейдер кинескопа, звук идёт через «динамик» телевизора. Чужих кнопок нет
+     вовсе — их просто неоткуда взять.
+     Если сервер не разрешает обрабатывать кадры (нет CORS), тот же файл играет
+     обычным <video> под стеклом кинескопа, с накладками строк и маски.
+   - rutube — официальный плеер RuTube в «голом» режиме (без кнопок и надписей),
+     под стеклом; пока ролик не пошёл — на экране помехи.
+   Всё, что может зависнуть, сторожит таймер: ролик не пошёл за ~15 с — следующий.
    ========================================================================== */
-const Embed = {
-  el: $('#tvEmbed'), player: null, ready: false, ch: null, loading: null, failed: false, msg: '',
-  status: 'idle', ytState: -2, errors: 0, hostIdx: 0, t0: 0,
-  hosts: ['https://www.youtube-nocookie.com', 'https://www.youtube.com'],
-  log(...a) { console.info('[Tube TV] YouTube:', ...a); },
+const QS = new URLSearchParams(location.search);
+const ARCHIVE = QS.get('archive') || 'https://archive.org';           // ?archive=… / ?rutube=… — только для проверок
+const RUTUBE = QS.get('rutube') || 'https://rutube.ru';
+const hashStr = s => { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0) / 4294967296; };
+
+const Feed = {
+  el: $('#tvEmbed'), ch: null, kind: null, status: 'idle', msg: '', visible: false, failed: false,
+  mode: 'gl', noCors: false, gen: 0, fails: 0, meta: {},
+  log(...a) { console.info('[Tube TV] эфир:', ...a); },
+
   init() {
     this.resize();
     const z = zpx(CFG.zones.screen), g = this.el.querySelector('.crt-glass');
@@ -1431,213 +1476,315 @@ const Embed = {
       backgroundSize: `calc(var(--u) * ${IMG_W}) calc(var(--u) * ${IMG_H})`,
       backgroundPosition: `calc(var(--u) * ${-z.x}) calc(var(--u) * ${-z.y})`,
     });
+    this.vGL = this.makeVideo(true);                       // кадры — в шейдер, звук — в Web Audio
+    this.vDOM = this.makeVideo(false);                     // запасной: обычное видео под стеклом
+    this.vDOM.className = 'feed-video';
+    this.el.prepend(this.vDOM);
+    addEventListener('message', e => this.onMessage(e));
+    idle(() => this.prefetch(), 1200);
+    setInterval(() => this.tick(), 1000);
   },
-  /* плеер рендерится крупным (YouTube выбирает качество по размеру плеера)
-     и уменьшается трансформацией; overscan прячет края кадра с надписями */
+
   resize() {
     placeEl(this.el, CFG.zones.screen);
     const E = CFG.embed, z = zpx(CFG.zones.screen), u = state.stage.u || 1;
-    const W = z.w * u, H = z.h * u, PW = E.playerWidth, PH = PW * 9 / 16;
-    const k = Math.max(H / PH, W / PW) * E.overscan;
+    const W = z.w * u, H = z.h * u, PW = 1280, PH = 720, CW = PH * 4 / 3;   // плеер 16:9, кадр внутри — 4:3
+    const k = Math.max(H / PH, W / CW) * (E.overscan || 1.06);
     this.el.style.setProperty('--yt-w', PW + 'px'); this.el.style.setProperty('--yt-h', PH + 'px');
     this.el.style.setProperty('--yt-k', k.toFixed(4));
     root.style.setProperty('--crt', E.crt);
   },
-  source(ch) {
-    const s = ch.source || {};
-    if (s.playlist) return { list: s.playlist };
-    if (s.channel) return { list: 'UU' + s.channel.slice(2) };            // «Загрузки» канала
-    if (s.videos && s.videos.length) return { videos: s.videos };
+
+  makeVideo(cors) {
+    const v = document.createElement('video');
+    v.playsInline = true; v.setAttribute('playsinline', ''); v.setAttribute('webkit-playsinline', '');
+    v.preload = 'auto'; v.controls = false; v.disablePictureInPicture = true;
+    v.setAttribute('disableremoteplayback', '');
+    if (cors) v.crossOrigin = 'anonymous';
+    v._cors = cors;
+    v.addEventListener('loadedmetadata', () => this.onMeta(v));
+    v.addEventListener('playing', () => this.onPlaying(v));
+    v.addEventListener('waiting', () => { if (v === this.v && this.status === 'playing') { this.waitSince = nowMs(); } });
+    v.addEventListener('timeupdate', () => {
+      if (v !== this.v) return;
+      this.progress = nowMs(); this.waitSince = 0;
+      if (this.status === 'tuning' && !v.paused && v.readyState >= 3) this.onPlaying(v);   // «playing» иногда приходит позже самой картинки
+    });
+    v.addEventListener('ended', () => { if (v === this.v) this.next(); });
+    v.addEventListener('error', () => this.onVideoError(v));
+    return v;
+  },
+
+  /* Safari разрешает звук только тем <video>, которые хоть раз запустили по клику.
+     На первом же касании запускаем оба элемента с секундой тишины. */
+  bless() {
+    if (this._blessed) return; this._blessed = true;
+    for (const v of [this.vGL, this.vDOM]) {
+      if (v.getAttribute('src')) continue;
+      v._blessing = true; v.muted = true; v.src = 'assets/blank.mp4';
+      const p = v.play(); if (p && p.catch) p.catch(() => {});
+      setTimeout(() => { if (v._blessing) { v._blessing = false; try { v.pause(); } catch (_) {} v.muted = false; } }, 700);
+    }
+  },
+
+  /* ---------- источники ---------- */
+  items(ch) { return (ch.items || ch.playlist || (ch.src ? [ch.src] : [])).map(it => typeof it === 'string' ? (ch.type === 'rutube' ? { id: it } : { url: it }) : it); },
+  pickItem(ch) {
+    const list = this.items(ch); if (!list.length) return null;
+    if (ch._i == null) ch._i = Math.floor(Math.random() * list.length);
+    else ch._i = (ch._i + 1) % list.length;
+    return list[ch._i];
+  },
+  fileUrl(id, name) { return `${ARCHIVE}/download/${id}/${name.split('/').map(encodeURIComponent).join('/')}`; },
+  resolveSync(it) {
+    if (it.url) return it.url;
+    if (it.id && it.file) return this.fileUrl(it.id, Array.isArray(it.file) ? pick(it.file) : it.file);
+    const m = it.id && this.meta[it.id];
+    if (m && m.length) return this.fileUrl(it.id, pick(m));
     return null;
   },
-  /* что показать на экране, пока видео не идёт */
-  screenText() {
-    if (this.failed) return null;
-    if (this.playing()) return this.visible ? null : 'НАСТРОЙКА…';
-    return { loading: 'ПОИСК СИГНАЛА…', starting: 'НАСТРОЙКА…', tap: 'НАЖМИТЕ НА ЭКРАН', skip: 'РОЛИК НЕДОСТУПЕН — ДАЛЬШЕ' }[this.status] || null;
+  /* без имени файла — спрашиваем у архива список роликов в записи */
+  async resolve(it) {
+    const now = this.resolveSync(it); if (now) return now;
+    if (!it.id) return null;
+    const r = await fetch(`${ARCHIVE}/metadata/${encodeURIComponent(it.id)}`, { mode: 'cors' });
+    const j = await r.json();
+    const files = (j.files || []).filter(f => /\.mp4$/i.test(f.name) && (!it.match || new RegExp(it.match, 'i').test(f.name)));
+    const plain = files.filter(f => !/\.ia\.mp4$/i.test(f.name));
+    const names = (plain.length ? plain : files).map(f => f.name);
+    this.meta[it.id] = names;
+    return names.length ? this.fileUrl(it.id, pick(names)) : null;
   },
-  playing() { return this.status === 'playing'; },
-  showing() { return this.playing() && this.visible; },
-  api() {
-    if (this.loading) return this.loading;
-    this.loading = new Promise((res, rej) => {
-      if (window.YT && window.YT.Player) return res();
-      const prev = window.onYouTubeIframeAPIReady;
-      window.onYouTubeIframeAPIReady = () => { if (prev) prev(); res(); };
-      const s = document.createElement('script');
-      s.src = 'https://www.youtube.com/iframe_api'; s.async = true; s.onerror = () => rej(new Error('blocked'));
-      document.head.appendChild(s);
-      setTimeout(() => rej(new Error('timeout')), 12000);
-    });
-    this.loading.catch(e => { this.log('API не загрузился:', e.message); this.loading = null; });
-    return this.loading;
+  prefetch() {
+    for (const ch of CFG.channels) if (ch.type === 'archive') for (const it of this.items(ch)) if (it.id && !it.file && !this.meta[it.id]) this.resolve(it).catch(() => {});
   },
-  setStatus(s) {
-    if (this.status === s) return;
-    this.status = s; this.log('статус', s);
-    this.el.classList.toggle('clickable', s === 'tap');
-  },
-  async play(ch) {
-    this.ch = ch; this.failed = false; this.msg = ''; this.errors = 0; this.show(false);
-    const s = this.source(ch);
-    if (!s) { this.failed = true; this.msg = 'впишите канал в config.js'; return; }
-    this.setStatus('loading');
-    try { await this.api(); }
-    catch (_) { this.failed = true; this.msg = location.protocol === 'file:' ? 'нужен локальный сервер' : 'YouTube недоступен'; this.setStatus('idle'); return; }
-    if (this.ch !== ch || !TV.on) return;
+
+  /* ---------- управление ---------- */
+  play(ch) {
+    this.halt();
+    this.ch = ch; this.kind = ch.type === 'rutube' ? 'rutube' : 'file';
+    this.failed = false; this.msg = ''; this.fails = 0; this.autoMuted = false;
     this.el.classList.add('on');
-    this.setStatus('starting');
-    this.t0 = nowMs();
-    if (!this.player) this.create(s);
-    else if (this.ready) this.load(s);
-    this.watch();
-  },
-  create(s) {
-    const host = document.createElement('div'); host.id = 'ytHost';
-    const old = this.el.querySelector('iframe, #ytHost'); if (old) old.remove();
-    this.el.prepend(host);
-    this.ready = false;
-    const hostUrl = this.hosts[this.hostIdx % this.hosts.length];
-    this.log('создаю плеер', hostUrl, s);
-    // ВАЖНО: для плейлиста поля videoId быть не должно вовсе (даже пустого) — иначе «Invalid video id»
-    const opts = {
-      width: String(CFG.embed.playerWidth), height: String(Math.round(CFG.embed.playerWidth * 9 / 16)), host: hostUrl,
-      playerVars: Object.assign({ autoplay: 1, mute: 1, controls: 0, disablekb: 1, fs: 0, iv_load_policy: 3, playsinline: 1, rel: 0, cc_load_policy: CFG.embed.captions ? 1 : 0, hl: CFG.embed.lang, cc_lang_pref: CFG.embed.lang },
-        s.list ? { listType: 'playlist', list: s.list } : {}, location.protocol.startsWith('http') ? { origin: location.origin } : {}),
-      events: {
-        onReady: () => {
-          this.ready = true; this.log('плеер готов');
-          if (!this.ch) { try { this.player.mute(); this.player.pauseVideo(); } catch (_) {} return; }
-          // пока плеер готовился, канал могли переключить — тогда грузим уже новый список
-          const cur = this.source(this.ch);
-          if (cur && (cur.list || null) !== (this._list || null)) this.load(cur); else this.shuffle();
-        },
-        onStateChange: e => this.onState(e.data),
-        onError: e => this.onError(e.data),
-      },
-    };
-    if (s.videos) opts.videoId = pick(s.videos);
-    this._list = s.list || null;
-    try { this.player = new YT.Player('ytHost', opts); }
-    catch (e) { this.log('плеер не создался:', e.message); this.failed = true; this.msg = 'YouTube: ' + e.message; this.setStatus('idle'); }
-  },
-  load(s) {
-    this._list = s.list || null;
-    try {
-      if (s.list) this.player.loadPlaylist({ list: s.list, listType: 'playlist', index: 0 });
-      else this.player.loadVideoById(pick(s.videos));
-    } catch (_) {}
-    this.shuffle();
-  },
-  /* состояния YouTube: -1 не начат, 0 закончился, 1 идёт, 2 пауза, 3 буферизация, 5 подготовлен */
-  onState(st) {
-    this.ytState = st; this.log('состояние', st);
-    clearTimeout(this._reveal);
-    // канал уже переключили или телевизор выключили, а ролик всё-таки стартовал — глушим
-    if (!this.ch || !TV.on) { if (st === 1 || st === 3) try { this.player.mute(); this.player.pauseVideo(); } catch (_) {} this.show(false); return; }
-    if (st === 1) {
-      this.errors = 0; this.setStatus('playing'); this.syncVolume(); this.noCaptions();
-      // YouTube несколько секунд после старта показывает название и кнопки (пауза, вперёд/назад) —
-      // держим «настройку», пока они не спрячутся, и только потом открываем картинку
-      this._reveal = setTimeout(() => { if (this.ytState === 1) this.show(true); }, CFG.embed.revealDelayMs);
-      this.guardEnd();
-      if (!this._seeked && this.ch && this.ch.randomStart) {
-        this._seeked = true;
-        setTimeout(() => { try { const d = this.player.getDuration(); if (d > 90) this.player.seekTo(d * rand(0.05, 0.6), true); } catch (_) {} }, 400);
-      }
-    }
-    else this.show(false);                                             // пауза, буферизация, конец — под снегом
-    if (st === 0) { this._seeked = false; this.next(); }
-  },
-  visible: false,
-  show(v) { this.visible = v; this.el.classList.toggle('revealed', v); },
-  /* В последние ~20 секунд ролика YouTube выводит заставки «смотрите также» и кнопки —
-     уходим на следующий ролик заранее, под «помехи» */
-  guardEnd() {
-    clearInterval(this._endIv);
-    this._endIv = setInterval(() => {
-      if (!this.player || this.ytState !== 1 || !this.ch) return;
-      try {
-        const d = this.player.getDuration(), t = this.player.getCurrentTime();
-        if (d > 45 && d - t < (CFG.embed.endGuardSec || 22)) { clearInterval(this._endIv); this.show(false); this._seeked = false; this.next(); }
-      } catch (_) {}
-    }, 1000);
-  },
-  noCaptions() {
-    if (CFG.embed.captions || !this.player) return;
-    try { this.player.unloadModule('captions'); } catch (_) {}
-    try { this.player.unloadModule('cc'); } catch (_) {}
-    try { this.player.setOption('captions', 'track', {}); } catch (_) {}
-  },
-  /* 2 — неверный параметр, 5 — ошибка HTML5-плеера, 100 — ролик удалён, 101/150 — владелец запретил встраивание */
-  onError(code) {
-    this.errors++; this.log('ошибка', code, 'подряд', this.errors);
-    if (this.errors >= 6) { this.failed = true; this.msg = `YouTube: ошибка ${code}`; this.setStatus('idle'); return; }
-    this.setStatus('skip');
-    setTimeout(() => { this._seeked = false; this.next(); }, 700);
-  },
-  /* если за несколько секунд видео не пошло — пробуем ещё раз, потом просим клик, потом меняем адрес плеера */
-  watch() {
-    clearTimeout(this._w1); clearTimeout(this._w2); clearTimeout(this._w3);
-    const ch = this.ch;
-    this._w1 = setTimeout(() => { if (this.ch === ch && !this.playing() && this.ready && !this.failed) { this.log('повторный запуск'); try { this.player.mute(); this.player.playVideo(); } catch (_) {} } }, 5000);
-    this._w2 = setTimeout(() => { if (this.ch === ch && !this.playing() && this.ready && !this.failed) this.setStatus('tap'); }, 9000);
-    this._w3 = setTimeout(() => {
-      if (this.ch !== ch || this.playing() || this.failed) return;
-      if (!this.ready || this.ytState === -2) {
-        this.hostIdx++; this.log('плеер не ответил, пробую', this.hosts[this.hostIdx % this.hosts.length]);
-        const s = this.source(ch); if (s) { this.setStatus('starting'); this.create(s); this.watch(); }
-      }
-    }, 14000);
-  },
-  /* клик по экрану (когда браузер не дал запуститься самому) */
-  tap() {
-    if (!this.player || !this.ready) return false;
-    try { this.player.mute(); this.player.playVideo(); } catch (_) {}
-    this.setStatus('starting');
-    return true;
-  },
-  shuffle() {
-    const ch = this.ch, s = ch && this.source(ch); if (!s || !this.player) return;
-    this._seeked = false;
-    const go = (tries = 0) => {
-      if (this.ch !== ch) return;                          // за это время переключили канал
-      try {
-        const n = (this.player.getPlaylist && this.player.getPlaylist() || []).length;
-        if (s.list && !n && tries < 10) return setTimeout(() => go(tries + 1), 400);   // плейлист ещё грузится
-        if (s.list && ch.shuffle !== false && n > 1) this.player.playVideoAt(Math.floor(Math.random() * n));
-        else this.player.playVideo();
-      } catch (_) {}
-    };
-    setTimeout(() => go(), 300);
+    if (this.kind === 'rutube') this.rtStart(); else this.fileStart();
   },
   next() {
-    const s = this.ch && this.source(this.ch); if (!s || !this.player) return;
-    try {
-      if (s.list) { const n = (this.player.getPlaylist() || []).length; this.player.playVideoAt(n > 1 ? Math.floor(Math.random() * n) : 0); }
-      else this.player.loadVideoById(pick(s.videos));
-    } catch (_) {}
+    if (!this.ch) return;
     TV.burstUntil = nowMs() + CFG.tv.staticBurstMs;
+    if (this.kind === 'rutube') this.rtStart(); else this.fileStart();
+  },
+  halt() {
+    this.gen++;
+    this.show(false); this.setStatus('idle');
+    for (const v of [this.vGL, this.vDOM]) { if (v && !v._blessing) try { v.pause(); } catch (_) {} }
+    if (this.rt) { this.rtSend('player:pause'); this.rtSend('player:mute'); }
   },
   stop() {
-    clearInterval(this._endIv);
-    this.ch = null; this.el.classList.remove('on'); this.setStatus('idle'); this.show(false);
-    clearTimeout(this._w1); clearTimeout(this._w2); clearTimeout(this._w3);
-    try { if (this.player && this.ready) this.player.pauseVideo(); } catch (_) {}
+    this.halt();
+    this.ch = null; this.el.classList.remove('on', 'dom', 'rt');
+    clearTimeout(this._unload);
+    // выключили надолго — перестаём качать видео
+    this._unload = setTimeout(() => {
+      if (this.ch) return;
+      for (const v of [this.vGL, this.vDOM]) { try { v.removeAttribute('src'); v.load(); } catch (_) {} }
+      if (this.rt) { this.rt.remove(); this.rt = null; }
+    }, 20000);
   },
-  /* звук включаем только когда ролик уже пошёл: беззвучный автозапуск браузеры разрешают всегда */
-  syncVolume() {
-    if (!this.player || !this.ready) return;
-    try {
-      if (state.muted || !TV.on || !this.playing()) this.player.mute();
-      else { this.player.unMute(); this.player.setVolume(Math.round(state.tvVolume * 100)); }
-    } catch (_) {}
+  setStatus(s) { if (this.status !== s) { this.status = s; this.log(s, this.ch ? this.ch.label : ''); } },
+  show(v) { this.visible = v; this.el.classList.toggle('revealed', v); },
+  skip(reason) {
+    this.fails++;
+    this.log('пропуск:', reason);
+    const n = this.ch ? this.items(this.ch).length : 0;
+    if (this.fails >= Math.min(5, n + 1)) return this.fail(this.kind === 'rutube' ? 'RuTube не отвечает' : 'архив не отвечает');
+    this.show(false); this.setStatus('skip');
+    const gen = this.gen;
+    setTimeout(() => { if (gen === this.gen && this.ch) this.next(); }, 700);
+  },
+  fail(msg) {
+    this.failed = true; this.msg = msg; this.show(false); this.setStatus('failed');
+    const gen = ++this.gen, ch = this.ch;
+    // через полминуты пробуем снова — сеть могла вернуться
+    setTimeout(() => { if (gen === this.gen && this.ch === ch && TV.on) { this.failed = false; this.fails = 0; this.next(); } }, 30000);
+  },
+
+  /* ---------- файлы ---------- */
+  fileStart() {
+    const ch = this.ch, gen = ++this.gen;
+    const it = this.pickItem(ch);
+    if (!it) return this.fail('нет записей');
+    this.item = it; this.setStatus('tuning'); this.show(false);
+    this.t0 = nowMs(); this.progress = 0; this.waitSince = 0; this.triedDom = false;
+    const url = this.resolveSync(it);
+    if (url) return this.load(url);
+    this.resolve(it).then(u => { if (gen !== this.gen) return; u ? this.load(u) : this.skip('пустая запись'); })
+      .catch(() => { if (gen === this.gen) this.skip('архив не ответил'); });
+  },
+  load(url) {
+    this.url = url;
+    this.mode = this.noCors ? 'dom' : 'gl';
+    this.el.classList.toggle('dom', this.mode === 'dom');
+    this.el.classList.remove('rt');
+    const v = this.mode === 'gl' ? this.vGL : this.vDOM;
+    for (const o of [this.vGL, this.vDOM]) if (o !== v) try { o.pause(); } catch (_) {}
+    this.v = v; v._blessing = false;
+    this.seekLive = this.ch.live !== false;
+    this.route(v); this.applyVolume();
+    if (v.src !== url) v.src = url; else this.onMeta(v);
+    this.tryPlay(v);
+  },
+  tryPlay(v) {
+    const p = v.play();
+    if (p && p.catch) p.catch(err => {
+      if (v !== this.v || !err || err.name !== 'NotAllowedError') return;
+      // браузер не дал звук без клика — идём без звука, звук вернёт клик по экрану
+      this.autoMuted = true; v.muted = true; v.play().catch(() => {});
+    });
+  },
+  onMeta(v) {
+    if (v !== this.v || !this.seekLive) return;
+    this.seekLive = false;
+    const d = v.duration;
+    if (!isFinite(d) || d < 90) return;
+    // «прямой эфир»: передача идёт и без нас, включаемся с того места, где она сейчас
+    const span = d - 45, pos = (Date.now() / 1000 + hashStr(this.url) * span) % span;
+    try { v.currentTime = Math.max(0, pos); } catch (_) {}
+  },
+  onPlaying(v) {
+    if (v._blessing) return;
+    if (v !== this.v || !this.ch) { try { v.pause(); } catch (_) {} return; }
+    if (!TV.on) { try { v.pause(); } catch (_) {} return; }
+    this.fails = 0; this.progress = nowMs(); this.waitSince = 0;
+    if (this.mode === 'dom' && this.triedDom && !this.noCors) { this.noCors = true; this.log('сервер без CORS — играю под стеклом'); }
+    this.setStatus('playing'); this.show(true);
+  },
+  onVideoError(v) {
+    if (v._blessing) { v._blessing = false; return; }
+    if (v !== this.v || !this.ch) return;
+    const code = v.error && v.error.code;
+    this.log('ошибка видео', code, this.url);
+    // с CORS не отдали — та же запись обычным элементом
+    if (this.mode === 'gl' && !this.triedDom) { this.triedDom = true; this.noCors = true; this.load(this.url); this.noCors = false; return; }
+    this.skip('ошибка ' + code);
+  },
+  route(v) {
+    if (!v._cors || !Sound.started || v._src || v._srcFailed) return;
+    try { v._src = Sound.ctx.createMediaElementSource(v); v._src.connect(Sound.tv); }
+    catch (_) { v._srcFailed = true; }
+  },
+  applyVolume() {
+    const quiet = state.muted || !TV.on || this.autoMuted;
+    for (const v of [this.vGL, this.vDOM]) {
+      if (!v || v._blessing) continue;
+      if (v._src) { v.muted = !!this.autoMuted; try { v.volume = 1; } catch (_) {} }   // громкость — в «динамике»
+      else { v.muted = quiet; try { v.volume = state.tvVolume; } catch (_) {} }
+    }
+    if (this.rt && this.status === 'playing') {
+      if (quiet) this.rtSend('player:mute');
+      else { this.rtSend('player:unMute'); this.rtSend('player:setVolume', { volume: state.tvVolume }); }
+    }
+  },
+  /* клик по экрану возвращает звук, если браузер запустил видео беззвучно */
+  tap() {
+    if (!this.autoMuted) return false;
+    this.autoMuted = false; this.route(this.v); this.applyVolume();
+    if (this.v && this.v.paused) this.tryPlay(this.v);
+    return true;
+  },
+  onSoundStart() { if (this.v) { this.route(this.v); this.applyVolume(); } },
+
+  /* ---------- RuTube ---------- */
+  rtStart() {
+    const ch = this.ch; ++this.gen;
+    const it = this.pickItem(ch);
+    if (!it) return this.fail('нет роликов');
+    for (const v of [this.vGL, this.vDOM]) try { v.pause(); } catch (_) {}
+    this.item = it; this.setStatus('tuning'); this.show(false);
+    this.t0 = nowMs(); this.progress = 0; this.waitSince = 0; this.rtSeeked = false; this.rtReady = false;
+    this.el.classList.add('rt'); this.el.classList.remove('dom');
+    let f = this.rt;
+    if (!f) {
+      f = document.createElement('iframe'); f.className = 'rt';
+      f.setAttribute('allow', 'autoplay; encrypted-media; picture-in-picture');
+      f.setAttribute('tabindex', '-1'); f.setAttribute('title', 'RuTube'); f.setAttribute('frameborder', '0');
+      this.el.prepend(f); this.rt = f;
+    }
+    const t = it.t ? `&t=${it.t}` : '';
+    f.src = `${RUTUBE}/play/embed/${it.id}/?autoplay=true&skinColor=111111${t}`;
+  },
+  rtSend(type, data) { try { this.rt && this.rt.contentWindow && this.rt.contentWindow.postMessage(JSON.stringify({ type, data: data || {} }), '*'); } catch (_) {} },
+  rtHide() { this.rtSend('player:enterNakedMode'); this.rtSend('player:hideControls'); },
+  onMessage(e) {
+    if (!this.rt || e.source !== this.rt.contentWindow) return;
+    let m = e.data;
+    if (typeof m === 'string') { try { m = JSON.parse(m); } catch (_) { return; } }
+    if (!m || typeof m.type !== 'string') return;
+    const d = m.data || {};
+    if (this.kind !== 'rutube' || !this.ch) { if (m.type === 'player:changeState' && d.state === 'playing') { this.rtSend('player:pause'); this.rtSend('player:mute'); } return; }
+    switch (m.type) {
+      case 'player:ready':
+        this.rtReady = true; this.rtHide(); this.rtSend('player:mute'); this.rtSend('player:play');
+        break;
+      case 'player:durationChange':
+        if (!this.rtSeeked && this.ch.live !== false && d.duration > 120) {
+          this.rtSeeked = true;
+          this.rtSend('player:setCurrentTime', { time: Math.floor(rand(0.04, 0.7) * d.duration) });
+        }
+        break;
+      case 'player:currentTime': this.progress = nowMs(); this.waitSince = 0; break;
+      case 'player:changeState':
+        if (d.state === 'playing') {
+          this.rtHide();
+          if (this.status !== 'playing') {
+            this.setStatus('playing'); this.fails = 0; this.progress = nowMs();
+            this.applyVolume();
+            const gen = this.gen;
+            clearTimeout(this._rev);
+            this._rev = setTimeout(() => { if (gen === this.gen && this.status === 'playing') this.show(true); }, 900);
+          }
+        } else if (d.state === 'buffering') { if (this.status === 'playing') this.waitSince = nowMs(); }
+        else if (d.state === 'pause' || d.state === 'paused') { if (this.status === 'playing' && TV.on) this.rtSend('player:play'); }
+        else if (d.state === 'completed') this.next();
+        break;
+      case 'player:controlsVisibilityChanged':
+        if (d.visible) { this.rtHide(); this.coverUntil = nowMs() + 900; }
+        break;
+      case 'player:playComplete': this.next(); break;
+      case 'player:error': this.skip('RuTube: ' + (d.message || d.type || 'ошибка')); break;
+    }
+  },
+
+  /* ---------- сторож ---------- */
+  tick() {
+    if (!this.ch || !TV.on || this.failed) return;
+    const t = nowMs();
+    if (this.status === 'tuning' && t - this.t0 > 16000) return this.skip('долго не начинается');
+    if (this.status === 'playing') {
+      if (this.waitSince && t - this.waitSince > 20000) return this.skip('связь пропала');
+      if (this.kind === 'file' && this.v && this.v.paused && !this.v.ended) this.tryPlay(this.v);
+    }
+  },
+
+  /* ---------- для кинескопа ---------- */
+  inShader() { return this.kind === 'file' && this.mode === 'gl' && this.v && this.v.readyState >= 2 && this.status === 'playing'; },
+  showing() { return this.status === 'playing' && this.visible && !this.inShader(); },
+  /* сила «снега» поверх картинки: подвисла связь — сигнал слабеет */
+  noise() {
+    const t = nowMs();
+    if (this.coverUntil && t < this.coverUntil) return 0.9;
+    if (this.status !== 'playing' || !this.waitSince) return 0;
+    return clamp((t - this.waitSince - 600) / 2500, 0, 0.85);
+  },
+  screenText() {
+    if (this.failed) return null;
+    if (this.status === 'playing') return this.waitSince && nowMs() - this.waitSince > 3500 ? 'ПОИСК СИГНАЛА…' : null;
+    return { tuning: 'ПОИСК СИГНАЛА…', skip: 'СЛЕДУЮЩАЯ ПЕРЕДАЧА' }[this.status] || null;
   },
   shape(s) {
-    const on = !!(s && s.sx * s.sy > 0 && this.ch && !this.failed);
+    const on = !!(s && s.sx * s.sy > 0 && this.ch && !this.failed && (this.mode === 'dom' || this.kind === 'rutube'));
     this.el.style.transform = on ? `scale(${s.sx.toFixed(3)}, ${Math.max(s.sy, 0.006).toFixed(3)})` : 'scale(0)';
     if (this._on !== on) { this.el.style.opacity = on ? 1 : 0; this._on = on; }
   },
+  syncVolume() { this.applyVolume(); },
 };
 
 /* ==========================================================================
@@ -1949,6 +2096,7 @@ const Sound = {
     this.loadFiles();                       // файлы подменят процедурный звук, когда загрузятся
     this.startAmbience();
     Events.start();
+    Feed.onSoundStart();
   },
 
   /* ---------- примитивы ---------- */
@@ -2020,6 +2168,7 @@ const Sound = {
     if (!this.tvPan || !this.tvPan.positionX) return;
     const t = this.ctx.currentTime, [x, y, z] = this.tvPos(on), d = CFG.seat.durationMs / 1000;
     for (const [p, v] of [[this.tvPan.positionX, x], [this.tvPan.positionY, y], [this.tvPan.positionZ, z]]) { p.cancelScheduledValues(t); p.setValueAtTime(p.value, t); p.linearRampToValueAtTime(v, t + d); }
+    if (this._knobPan && this._knobPan.positionX) for (const [p, v] of [[this._knobPan.positionX, x + (on ? 0.22 : 0.32)], [this._knobPan.positionY, y], [this._knobPan.positionZ, z]]) { p.cancelScheduledValues(t); p.setValueAtTime(p.value, t); p.linearRampToValueAtTime(v, t + d); }
   },
   p(v, where = 'room') { return this.panner(where, v); },
   out(node, dest, pan) { if (pan == null) { node.connect(dest); return; } node.connect(this.spotNode(dest, this.where(dest), pan)); },
@@ -2160,9 +2309,7 @@ const Sound = {
   setMuted(m) {
     state.muted = m;
     if (this.master) this.master.gain.setTargetAtTime(m ? 0 : CFG.audio.master, this.ctx.currentTime, 0.06);
-    for (const ch of CFG.channels) if (ch._video && !ch._src) ch._video.muted = m;
-    Embed.syncVolume();
-    Radio.syncMute();
+    Feed.syncVolume();
   },
   setAmbience(v) { state.ambience = v; this.applyVent(); },
   /* форточка: улица и события тише/громче, тон комнаты не меняется */
@@ -2182,8 +2329,7 @@ const Sound = {
   setTvVolume(v) {
     state.tvVolume = v;
     if (this.tv) this.tv.gain.setTargetAtTime(v, this.ctx.currentTime, 0.04);
-    for (const ch of CFG.channels) if (ch._video && !ch._src) ch._video.volume = v;
-    Embed.syncVolume();
+    Feed.syncVolume();
   },
 
   /* ---------- фон: группа звуков на каждую сцену ---------- */
@@ -2626,21 +2772,73 @@ const Sound = {
       w.gn.gain.setTargetAtTime(0, t, 0.08); w.o.stop(t + 0.6);
     }
   },
+  /* Звук, посчитанный заранее по формуле (сэмпл за сэмплом) — для коротких механических щелчков */
+  baked(name, dur, fn) {
+    this._baked = this._baked || {};
+    if (this._baked[name]) return this._baked[name];
+    const sr = this.ctx.sampleRate, n = Math.ceil(dur * sr), b = this.ctx.createBuffer(1, n, sr), d = b.getChannelData(0);
+    fn(d, sr);
+    let pk = 0; for (let i = 0; i < n; i++) pk = Math.max(pk, Math.abs(d[i]));
+    if (pk > 0) for (let i = 0; i < n; i++) d[i] *= 0.7 / pk;
+    return (this._baked[name] = b);
+  },
+  /* Щелчок тумблера: нажатие + «досадка» защёлки через десяток миллисекунд.
+     Корпус переключателя — несколько затухающих мод (глухой «тук» ~190 Гц и пластик 1–3 кГц),
+     контакт — короткий шорох. Верхов почти нет: щелчок мягкий, не «цифровой». */
+  toggleBuf(v) {
+    return this.baked('toggle' + v, 0.14, (d, sr) => {
+      const R = (a, b) => a + Math.random() * (b - a);
+      const ev = [[0, 1], [R(0.010, 0.015), R(0.28, 0.4)], [R(0.05, 0.07), R(0.05, 0.09)]];
+      const modes = [[R(180, 205), 0.017, 0.55], [R(400, 440), 0.010, 0.30], [R(1180, 1320), 0.0055, 0.36], [R(2500, 2800), 0.0030, 0.18], [R(4100, 4500), 0.0016, 0.06]];
+      for (const [t0, a] of ev) {
+        const i0 = Math.floor(t0 * sr), ph = modes.map(() => R(0, 6.28));
+        for (let i = i0; i < d.length; i++) {
+          const t = (i - i0) / sr; if (t > 0.08) break;
+          let x = 0;
+          for (let k = 0; k < modes.length; k++) { const [f, tau, amp] = modes[k]; x += amp * Math.exp(-t / tau) * Math.sin(6.2831853 * f * t + ph[k]); }
+          x += 0.22 * Math.exp(-t / 0.0006) * (Math.random() * 2 - 1);
+          d[i] += a * x * Math.min(1, t / 0.0004);
+        }
+      }
+      let y = 0; const k = 1 - Math.exp(-6.2831853 * 5200 / sr);   // мягкий срез верхов
+      for (let i = 0; i < d.length; i++) { y += k * (d[i] - y); d[i] = y; }
+    });
+  },
+  knobOut() {
+    if (this._knob) return this._knob;
+    const g = this.g(0.55), p = this.ctx.createPanner ? this.ctx.createPanner() : null;
+    if (p) {
+      p.panningModel = this.hrtf ? 'HRTF' : 'equalpower'; p.distanceModel = 'inverse'; p.refDistance = 2.7; p.rolloffFactor = 1;
+      const [x, y, z] = this.tvPos(Camera.seated); this.setPos(p, x + 0.32, y, z); this.panners.add(p); this._knobPan = p;
+      g.connect(p).connect(this.master);
+    } else g.connect(this.master);
+    g.connect(this.g(0.35)).connect(this.roomVerb);
+    return (this._knob = g);
+  },
   channelClick(tvOn) {
     if (!this.started) return;
-    const t = this.ctx.currentTime + 0.01;
+    const t = this.ctx.currentTime + 0.005;
     if (!this.playFile('channel-click', t, this.sfx)) {
-      this.burst(t, { dur: 0.025, vol: 0.4, f: 1800, q: 1.5 });
-      this.tone(t, { f: 150, f2: 90, type: 'triangle', dur: 0.05, vol: 0.25 });
+      const src = this.ctx.createBufferSource();
+      src.buffer = this.toggleBuf(Math.floor(Math.random() * 4));
+      src.playbackRate.value = rand(0.96, 1.04);
+      const g = this.g(CFG.audio.sfxVolume * 0.9); src.connect(g).connect(this.knobOut());
+      src.start(t); src.onended = () => g.disconnect();
     }
-    if (tvOn) this.burst(t + 0.01, { dur: CFG.tv.staticBurstMs / 1000, vol: 0.32, type: 'highpass', f: 300, dest: this.tv, attack: 0.01 });
+    // в телевизоре: короткое шипение, пока ПТК перескакивает на другой канал
+    if (tvOn) this.burst(t + 0.012, { dur: CFG.tv.staticBurstMs / 1000, vol: 0.16, type: 'bandpass', f: 2600, q: 0.6, dest: this.tv, attack: 0.02 });
   },
+  /* ручка громкости: мягкие «зубчики» фиксатора */
   knobTick() {
     if (!this.started) return;
     const t = this.ctx.currentTime;
     if (this._lastTick && t - this._lastTick < 0.05) return;
     this._lastTick = t;
-    this.burst(t, { dur: 0.008, vol: 0.08, f: 3000, q: 2 });
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.toggleBuf(Math.floor(Math.random() * 4));
+    src.playbackRate.value = rand(1.5, 1.7);
+    const g = this.g(CFG.audio.sfxVolume * 0.22); src.connect(g).connect(this.knobOut());
+    src.start(t + 0.005); src.onended = () => g.disconnect();
   },
   stopChannel() {
     if (this._chan) { this._chan.stop(this.ctx.currentTime); this._chan = null; }
@@ -2665,14 +2863,9 @@ const Sound = {
       });
     } else if (ch.type === 'morning') {
       this._chan = this.loop('tv-morning', tv, 0.8, () => this.morningMusic(tv, ch.musicVolume ?? 0.32));
-    } else if (ch.type === 'video') {
-      this._chan = null;  // звук идёт из самого видео
+    } else {
+      this._chan = null;  // видео-каналы: звук идёт из самого видео
     }
-  },
-  routeVideo(ch, v) {
-    if (!this.started || ch._src || ch._srcFailed) { v.muted = state.muted; return; }
-    try { ch._src = this.ctx.createMediaElementSource(v); ch._src.connect(this.tv); }
-    catch (_) { ch._srcFailed = true; v.volume = state.tvVolume; v.muted = state.muted; }
   },
 
   /* Бодрая утренняя музыка: C – Am – F – G, 112 bpm (оригинальная мелодия) */
@@ -2791,6 +2984,14 @@ const Sound = {
       n.start(t, 0, 2.8);
       this.tone(t + rand(0.5, 1.8), { f: 1800, f2: 2100, dur: 0.15, vol: 0.01, dest: d, pan });
     },
+    /* олень: тихий звон хрусталя — несколько бокалов задели друг друга */
+    'egg-deer'(t, d, pan) {
+      const gn = this.g(1); this.out(gn, d, pan); gn.connect(this.verb);
+      [[0, 2637, 0.05], [0.09, 3520, 0.035], [0.22, 2960, 0.03]].forEach(([dt, f, v]) => {
+        for (const [m, a, dur] of [[1, 1, 1.6], [2.76, 0.35, 0.7], [5.4, 0.12, 0.35]]) this.tone(t + dt, { f: f * m * rand(0.997, 1.003), dur, vol: v * a, attack: 0.001, dest: gn });
+      });
+      setTimeout(() => gn.disconnect(), 3000);
+    },
     'egg-figurine'(t, d, pan) {
       const notes = [84, 88, 91, 88, 86, 84, 83, 86, 89, 86, 84, 79, 84];
       let tt = t, gap = 0.3;
@@ -2899,9 +3100,6 @@ const Zones = {
       { id: 'lamp', cls: 'lamp', pad: 0.05, label: () => T.lamp[nextIn(CFG.timeCycle, state.mode)] },
       { id: 'window', cls: 'window', pad: 0, label: () => T.weatherNext[nextIn(CFG.weatherCycle, state.weather)] },
       { id: 'drape', cls: 'drape', pad: 0, label: () => T.drape[Vent.index()] },
-      ...(CFG.radio ? [{ id: 'radio', cls: 'radio', pad: 0.04, label: () => Radio.label() }] : []),
-      ...(CFG.vcr ? [{ id: 'vcr', cls: 'prop-zone', pad: 0.04, label: () => VCR.label() }] : []),
-      ...(CFG.props ? [{ id: 'clock', cls: 'prop-zone', pad: 0.05, label: () => Props.clockLabel() }, { id: 'calendar', cls: 'prop-zone', pad: 0.05, label: () => Props.calLabel() }] : []),
       ...CFG.eggs.map(e => ({ id: e.id, cls: 'egg' + (e.eveningOnly ? ' evening-only' : ''), pad: 0.22, label: () => e.label, egg: e })),
     ];
   },
@@ -2919,18 +3117,55 @@ const Zones = {
     }
     this.apply();
   },
+  KNOBS: ['power', 'channelKnob', 'volumeKnob'],
+  /* зона в процентах комнаты; ручки в режиме «сесть» — по крупному плану */
+  zoneOf(id) {
+    if (Camera.seated && CFG.closeup && this.KNOBS.includes(id)) {
+      const [X, Y, r] = CFG.closeup.knobs[id], [x, y] = Close.toRoom(X, Y), m = Close.map();
+      const rx = r * m.sx, ry = (id === 'power' ? r * 0.5 : r) * m.sy;
+      return { x: (x - rx) / IMG_W * 100, y: (y - ry) / IMG_H * 100, w: 2 * rx / IMG_W * 100, h: 2 * ry / IMG_H * 100 };
+    }
+    return CFG.zones[id];
+  },
   apply() {
+    const C = CFG.closeup, seated = Camera.seated && C && Close.scene;
     for (const [id, el] of Object.entries(this.els)) {
-      const z = CFG.zones[id]; placeEl(el, z);
+      const z = this.zoneOf(id); placeEl(el, z);
       const pad = el._def.pad, crop = el.querySelector('.crop'), p = zpx(z);
       const cx = p.x - p.w * pad, cy = p.y - p.h * pad;
       Object.assign(crop.style, {
         left: (-pad * 100) + '%', top: (-pad * 100) + '%', width: (100 + pad * 200) + '%', height: (100 + pad * 200) + '%',
-        backgroundSize: `calc(var(--u) * ${IMG_W}) calc(var(--u) * ${IMG_H})`,
-        backgroundPosition: `calc(var(--u) * ${-cx}) calc(var(--u) * ${-cy})`,
       });
+      const knob = this.KNOBS.includes(id);
+      if (knob && seated) {                         // ручка вырезается из того же крупного плана, что на экране
+        const m = Close.map();
+        Object.assign(crop.style, { backgroundImage: `url("${C.images[Close.scene]}")`,
+          backgroundSize: `calc(var(--u) * ${C.size[0] * m.sx}) calc(var(--u) * ${C.size[1] * m.sy})`,
+          backgroundPosition: `calc(var(--u) * ${m.x0 - cx}) calc(var(--u) * ${m.y0 - cy})` });
+      } else {
+        Object.assign(crop.style, { backgroundImage: '',
+          backgroundSize: `calc(var(--u) * ${IMG_W}) calc(var(--u) * ${IMG_H})`,
+          backgroundPosition: `calc(var(--u) * ${-cx}) calc(var(--u) * ${-cy})` });
+      }
+      if (knob) { el._src = { x: cx, y: cy, w: p.w * (1 + pad * 2), h: p.h * (1 + pad * 2) }; el.classList.toggle('live-crop', !seated && !!BG.gl); }
     }
-    const ph = $('#powerHint'); placeEl(ph, CFG.zones.power);
+    const ph = $('#powerHint'); placeEl(ph, this.zoneOf('power'));
+    this._kt = 0;
+  },
+  /* ручки в комнате: вырезка берётся из того кадра, что сейчас нарисовал WebGL, —
+     поэтому при любом свете (закат, ночь, свечение экрана) ручка не отличается от фона */
+  paintKnobs(t) {
+    if (!BG.gl || !GLRoom.ok || Camera.seated || t - (this._kt || 0) < 250) return;
+    this._kt = t;
+    const src = GLRoom.c, k = src.width / IMG_W;
+    for (const id of this.KNOBS) {
+      const el = this.els[id]; if (!el || !el._src) continue;
+      let cv = el._kc;
+      if (!cv) { cv = el._kc = document.createElement('canvas'); cv.className = 'kc'; el.querySelector('.crop').appendChild(cv); }
+      const r = el._src, w = Math.max(2, Math.round(r.w * k)), h = Math.max(2, Math.round(r.h * k));
+      if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+      try { cv.getContext('2d').drawImage(src, r.x * k, r.y * k, r.w * k, r.h * k, 0, 0, w, h); } catch (_) {}
+    }
   },
   refreshLabels() { for (const el of Object.values(this.els)) el.setAttribute('aria-label', el._def.label()); },
 
@@ -2952,7 +3187,6 @@ const Zones = {
     el.addEventListener('focus', () => { this.showCaption(el); if (d.egg) Puppets.hover(d.id, true); });
     el.addEventListener('blur', () => { this.hideCaption(); if (d.egg) Puppets.hover(d.id, false); });
     if (d.id === 'volumeKnob') return this.bindVolume(el);
-    if (d.id === 'radio') el.addEventListener('wheel', e => { e.preventDefault(); Radio.setVolume(state.radioVolume + (e.deltaY < 0 ? 0.05 : -0.05)); }, { passive: false });
     if (d.id === 'drape') el.addEventListener('wheel', e => { e.preventDefault(); Sound.start(); Vent.set(state.vent + (e.deltaY < 0 ? 0.04 : -0.04), true); this.showCaption(el); }, { passive: false });
     if (d.id === 'channelKnob') {
       el.addEventListener('wheel', e => {
@@ -2963,7 +3197,6 @@ const Zones = {
       el.addEventListener('contextmenu', e => { e.preventDefault(); this.turnChannel(-1); });
     }
     el.addEventListener('click', async e => {
-      if (d.id === 'radio') { Radio.click(); if (!HOVER) this.showCaption(el, 2600); return; }   // без ожиданий: Safari пускает звук только прямо в щелчке
       await Sound.start();
       const below = !!(d.egg && d.egg.fx);           // эффект поднимается вверх — подпись уводим вниз
       if (!HOVER || below) this.showCaption(el, HOVER ? 0 : 1800, below);
@@ -2990,14 +3223,6 @@ const Zones = {
       setWeather(nextIn(CFG.weatherCycle, state.weather));
       UI.toast(T.weatherNow[state.weather], 2600);
       if (HOVER && el.matches(':hover')) this.showCaption(el);
-    } else if (d.id === 'radio') {
-      Radio.click();
-    } else if (d.id === 'clock') {
-      Props.ring();
-    } else if (d.id === 'vcr') {
-      VCR.click();
-    } else if (d.id === 'calendar') {
-      Props.tear();
     } else if (d.egg) {
       this.playEgg(d.egg, el);
     }
@@ -3056,10 +3281,60 @@ const Zones = {
     // у кубика щелчки звучат на каждом повороте грани; файл egg-rubik, если он есть, играет целиком
     if (egg.anim !== 'cube' || Sound.files[egg.sound]) Sound.egg(egg.sound, pan);
     el.classList.add('active');
+    if (egg.id === 'deer') Deer.poke();
     const done = Puppets.items[egg.id] ? Puppets.play(egg.id) : wait(800);
     done.then(() => el.classList.remove('active'));
     if (egg.fx) FX[egg.fx] && FX[egg.fx](z);
   },
+};
+
+/* ==========================================================================
+   7a. ФОСФОРНЫЙ ОЛЕНЬ И «RTX»
+   Статуэтка стоит в серванте среди хрусталя. Фосфор днём набирает свет, а в темноте
+   отдаёт его еле заметным холодным зелёным свечением, которое медленно слабеет.
+   «RTX» — расчёт света в хрустале (блики с дисперсией, каустики на задней стенке,
+   отсветы экрана и торшера); считается в шейдере комнаты, кнопка RTX включает и выключает.
+   ========================================================================== */
+const Deer = {
+  charge: 1, last: 0, flashT: 0, rtx: false, rk: 0, rFrom: 0, rT0: 0,
+  init() {
+    let saved = null; try { saved = localStorage.getItem('tubetv.rtx'); } catch (_) {}
+    const weak = matchMedia('(max-width: 760px), (pointer: coarse)').matches;
+    this.rtx = saved != null ? saved === '1' : !weak;
+    this.rk = this.rFrom = this.rtx ? 1 : 0;
+    this.last = nowMs();
+    const b = $('#rtxBtn');
+    if (b) { b.setAttribute('aria-pressed', String(this.rtx)); b.addEventListener('click', () => { Sound.start(); this.setRtx(!this.rtx); }); }
+  },
+  setRtx(on) {
+    this.rtx = on; this.rFrom = this.rk; this.rT0 = nowMs();
+    try { localStorage.setItem('tubetv.rtx', on ? '1' : '0'); } catch (_) {}
+    const b = $('#rtxBtn'); if (b) b.setAttribute('aria-pressed', String(on));
+    UI.toast(on ? T.rtxOn : T.rtxOff, 2600);
+    GLRoom.dirty = true;
+  },
+  rtxK(t) {
+    const to = this.rtx ? 1 : 0;
+    if (this.rk !== to) { const k = clamp((t - this.rT0) / 700, 0, 1); this.rk = lerp(this.rFrom, to, smooth(0, 1, k)); if (k >= 1) this.rk = to; GLRoom.dirty = true; }
+    return this.rk;
+  },
+  /* яркость свечения: чем темнее в комнате, тем заметнее; заряд копится на свету и уходит в темноте */
+  level(c) {
+    const t = nowMs(), dt = Math.min(1, Math.max(0, (t - this.last) / 1000)); this.last = t;
+    const dark = clamp(c.n + 0.2 * c.w[1] + 0.1 * (c.w[2] + c.w[3]), 0, 1);
+    if (c.n < 0.5) this.charge += (1 - this.charge) * (1 - Math.exp(-dt / 25));
+    else this.charge += (0.4 - this.charge) * (1 - Math.exp(-dt / 420));
+    if (TV.on) this.charge = Math.min(1, this.charge + TV.level * 0.004 * dt);
+    const flash = this.flashT ? Math.max(0, 1 - (t - this.flashT) / 5000) : 0;
+    return dark * (0.55 + 0.45 * this.charge + 0.8 * flash * flash);
+  },
+  tvLight() {
+    if (!TV.on || !(TV.level > 0)) return [0, 0, 0];
+    const k = Math.min(1.4, TV.level) * 0.9;
+    return TV.avg.map(x => Math.pow(clamp(x, 0, 1), 2.2) * k);
+  },
+  /* щелчок по статуэтке: «подзарядили» — вспыхивает и снова медленно гаснет */
+  poke() { this.flashT = nowMs(); this.charge = 1; GLRoom.dirty = true; },
 };
 
 /* ==========================================================================
@@ -3114,7 +3389,7 @@ const Puppets = {
     this.mode = mode;
     if (!this.live) return;
     for (const p of Object.values(this.items)) {
-      const id = p.egg.id, cut = id === 'sachet' ? Pack.spriteURL(mode) : this.src(id, mode);
+      const id = p.egg.id, cut = this.src(id, mode);
       p.el.querySelector('.plate').src = this.src(id, mode, true);
       p.sprite.src = cut;
       if (p.sides) for (const s of p.sides) s.src = cut;
@@ -3193,7 +3468,7 @@ const Puppets = {
   },
   /* маска предмета — альфа дневной вырезки */
   maskOf(p) {
-    return new Promise(r => { const im = new Image(); im.onload = () => r(im); im.onerror = () => r(null); im.src = p.egg.id === 'sachet' ? Pack.spriteURL('day') : this.src(p.egg.id, 'day'); });
+    return new Promise(r => { const im = new Image(); im.onload = () => r(im); im.onerror = () => r(null); im.src = this.src(p.egg.id, 'day'); });
   },
 
   sheen(p, dur, delay = 0) {
@@ -3601,872 +3876,6 @@ void main(){
   },
 };
 
-/* ==========================================================================
-   7c. РАДИОТОЧКА
-   Трёхпрограммный громкоговоритель стоит на телевизоре слева. Нарисован кодом
-   (корпус, ткань, клавиши, ручка) и освещается так же, как комната в каждой сцене.
-   Звук — записи старых передач из Internet Archive, через «проводной» фильтр,
-   в объёме: из угла ниши, с отзвуком комнаты.
-   ========================================================================== */
-const Radio = {
-  prog: -1, light: null, lightTo: null, lightT0: 0,
-  // освещение ниши в каждой сцене: цвет света и откуда он (−1 слева … +1 справа)
-  LIGHT: {
-    day:      { c: [0.53, 0.46, 0.37], dir: 0.55 },
-    sunset:   { c: [0.50, 0.35, 0.25], dir: 0.8 },
-    evening:  { c: [0.40, 0.27, 0.15], dir: -0.9 },
-    night:    { c: [0.09, 0.10, 0.15], dir: 0.4 },
-    overcast: { c: [0.29, 0.28, 0.29], dir: 0.3 },
-    storm:    { c: [0.19, 0.19, 0.21], dir: 0.3 },
-  },
-  init() {
-    const R = CFG.radio; if (!R) return;
-    const [x, y, w, h] = R.box, m = { l: 14, t: 14, r: 12, b: 8 };
-    this.geo = { x: x - m.l, y: y - m.t, w: w + m.l + m.r, h: h + m.t + m.b, m, bw: w, bh: h };
-    const el = this.el = document.createElement('div'); el.className = 'radio-pt';
-    Object.assign(el.style, { left: this.geo.x / IMG_W * 100 + '%', top: this.geo.y / IMG_H * 100 + '%', width: this.geo.w / IMG_W * 100 + '%', height: this.geo.h / IMG_H * 100 + '%' });
-    el.innerHTML = '<canvas></canvas><i class="radio-glow"></i>';
-    stageEl.insertBefore(el, $('#glow'));                 // под слоями света: его тоже освещает экран, мигалка, вспышка
-    this.cv = el.querySelector('canvas'); this.g = this.cv.getContext('2d');
-    this.light = this.sceneLight(state.scene);
-    this.resize();
-    addEventListener('resize', () => this.resize());
-  },
-  sceneLight(scene) { const L = this.LIGHT[scene] || this.LIGHT.day; return { c: L.c.slice(), dir: L.dir }; },
-  setScene(scene) {
-    if (!this.el) return;
-    this.lightFrom = { c: this.light.c.slice(), dir: this.light.dir }; this.lightTo = this.sceneLight(scene); this.lightT0 = nowMs();
-  },
-  resize() {
-    if (!this.cv) return;
-    const k = Math.min(4, state.stage.u * (devicePixelRatio || 1) * (Camera.seated ? state.zoom || 1 : 1));
-    const W = Math.round(this.geo.w * k), H = Math.round(this.geo.h * k);
-    if (this.cv.width !== W || this.cv.height !== H) { this.cv.width = W; this.cv.height = H; }
-    this.k = k; this.draw();
-  },
-  update(t) {
-    if (!this.lightTo) return;
-    const e = smooth(0, 1, clamp((t - this.lightT0) / CFG.crossfadeMs, 0, 1));
-    this.light = { c: this.lightFrom.c.map((v, i) => lerp(v, this.lightTo.c[i], e)), dir: lerp(this.lightFrom.dir, this.lightTo.dir, e) };
-    this.draw();
-    if (e >= 1) this.lightTo = null;
-  },
-
-  /* ---------- рисунок ---------- */
-  draw() {
-    const g = this.g, k = this.k, G = this.geo, L = this.light; if (!g || !k) return;
-    g.setTransform(1, 0, 0, 1, 0, 0); g.clearRect(0, 0, this.cv.width, this.cv.height);
-    g.setTransform(k, 0, 0, k, G.m.l * k, G.m.t * k);           // единицы — пиксели картинки, (0,0) — левый верх передней панели
-    const W = G.bw, H = G.bh, top = 6, side = 3;              // видно чуть сверху и чуть справа
-    const lum = (L.c[0] * 0.3 + L.c[1] * 0.59 + L.c[2] * 0.11);
-    const lit = (rgb, s = 1) => `rgb(${rgb.map((v, i) => clamp(Math.round(v * L.c[i] * s), 0, 255)).join(',')})`;
-    const rr = (x, y, w, h, r) => { g.beginPath(); g.moveTo(x + r, y); g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r); g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath(); };
-    const on = this.prog >= 0;
-
-    // тени: на заднюю стенку ниши (от света сбоку) и под корпусом на крышку телевизора
-    g.save();
-    g.shadowColor = `rgba(8,4,2,${0.55 - 0.15 * Math.abs(L.dir)})`; g.shadowBlur = 9 * k; g.shadowOffsetX = -L.dir * 7 * k; g.shadowOffsetY = -2 * k;
-    g.fillStyle = 'rgba(0,0,0,1)'; rr(2, 2, W - 4, H - 6, 4); g.fill();
-    g.restore();
-    g.clearRect(-1, -top - 1, W + side + 2, H + top + 2);       // сама коробка закроет это место
-    g.save(); g.globalAlpha = 0.6;
-    const cs = g.createRadialGradient(W / 2, H, 2, W / 2, H, W * 0.62);
-    cs.addColorStop(0, 'rgba(10,5,2,.85)'); cs.addColorStop(1, 'rgba(10,5,2,0)');
-    g.fillStyle = cs; g.scale(1, 0.12); g.fillRect(-12, (H - 30) / 0.12, W + 24, 60 / 0.12); g.restore();
-
-    // провод: из-за корпуса вниз, за телевизор
-    g.save(); g.strokeStyle = lit([60, 52, 46]); g.lineWidth = 1.5; g.lineCap = 'round';
-    g.beginPath(); g.moveTo(2, H - 10); g.bezierCurveTo(-6, H - 6, -8, H + 2, -12, H + 6); g.stroke(); g.restore();
-
-    const IVORY = [232, 220, 192], IVORY_D = [196, 182, 152];
-    // правый бок (виден чуть-чуть)
-    g.fillStyle = lit(IVORY_D, 0.72 + 0.2 * Math.max(0, L.dir));
-    g.beginPath(); g.moveTo(W - 1, 3); g.lineTo(W + side, -top + 3); g.lineTo(W + side, H - top + 1); g.lineTo(W - 1, H - 1); g.closePath(); g.fill();
-    // крышка
-    g.fillStyle = lit(IVORY, 1.06);
-    g.beginPath(); g.moveTo(3, 0); g.lineTo(W - 3, 0); g.lineTo(W + side - 2, -top); g.lineTo(side + 2, -top); g.closePath(); g.fill();
-    // клавиши программ на крышке (справа); нажатая — ниже и темнее
-    for (let i = 0; i < 3; i++) {
-      const kx = W - 34 + i * 10 + side * 0.4, down = on && this.prog === i;
-      const ky = -top + 1.5, kh = top - 2.5, rise = down ? 0.4 : 2;
-      g.fillStyle = lit([214, 204, 182], down ? 0.7 : 1.0); g.fillRect(kx, ky - rise, 8, kh + rise * 0.4);
-      g.fillStyle = lit([250, 244, 228], down ? 0.75 : 1.12); g.fillRect(kx, ky - rise, 8, 1.4);
-      g.fillStyle = 'rgba(40,25,10,.35)'; g.fillRect(kx, ky - rise + kh + rise * 0.4, 8, 0.8);
-    }
-    // передняя панель
-    const body = g.createLinearGradient(0, 0, 0, H);
-    body.addColorStop(0, lit(IVORY, 1.02)); body.addColorStop(0.55, lit(IVORY, 0.93)); body.addColorStop(1, lit(IVORY_D, 0.78));
-    g.fillStyle = body; rr(0, 0, W, H, 4.5); g.fill();
-    // ткань громкоговорителя
-    const gx = 5, gy = 5, gw = W * 0.64, gh = H - 13;
-    g.save(); rr(gx, gy, gw, gh, 3); g.clip();
-    g.fillStyle = lit([150, 116, 78]); g.fillRect(gx, gy, gw, gh);
-    g.globalAlpha = 0.5; g.lineWidth = 0.35;
-    for (let yy = gy; yy < gy + gh; yy += 0.9) { g.strokeStyle = lit((yy * 7 | 0) % 2 ? [176, 140, 98] : [120, 90, 60]); g.beginPath(); g.moveTo(gx, yy); g.lineTo(gx + gw, yy); g.stroke(); }
-    g.globalAlpha = 0.28;
-    for (let xx = gx; xx < gx + gw; xx += 0.9) { g.strokeStyle = lit([96, 72, 46]); g.beginPath(); g.moveTo(xx, gy); g.lineTo(xx, gy + gh); g.stroke(); }
-    g.globalAlpha = 1;
-    // вертикальные планки поверх ткани
-    for (let i = 1; i < 9; i++) { const xx = gx + gw * i / 9; g.fillStyle = lit([196, 180, 148], 0.9); g.fillRect(xx - 0.55, gy, 1.1, gh); g.fillStyle = 'rgba(30,18,8,.28)'; g.fillRect(xx + 0.55, gy, 0.5, gh); }
-    const vg = g.createRadialGradient(gx + gw / 2, gy + gh / 2, gh * 0.2, gx + gw / 2, gy + gh / 2, gw * 0.7);
-    vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(20,10,4,.45)'); g.fillStyle = vg; g.fillRect(gx, gy, gw, gh);
-    g.restore();
-    g.strokeStyle = 'rgba(40,24,10,.5)'; g.lineWidth = 0.8; rr(gx, gy, gw, gh, 3); g.stroke();
-    // латунная полоска под тканью
-    const brass = g.createLinearGradient(gx, 0, gx + gw, 0);
-    brass.addColorStop(0, lit([150, 112, 50])); brass.addColorStop(0.5, lit([236, 196, 110], 1.1)); brass.addColorStop(1, lit([150, 112, 50]));
-    g.fillStyle = brass; g.fillRect(gx, gy + gh + 2.2, gw, 1.6);
-    // шкала программ
-    const dx = gx + gw + 5, dw = W - dx - 5, dy = 6, dh = 17;
-    g.fillStyle = on ? '#1b0f05' : lit([40, 34, 30]); rr(dx, dy, dw, dh, 2); g.fill();
-    if (on) {
-      const amb = g.createRadialGradient(dx + dw / 2, dy + dh / 2, 1, dx + dw / 2, dy + dh / 2, dw * 0.8);
-      amb.addColorStop(0, 'rgba(255,190,90,.95)'); amb.addColorStop(1, 'rgba(200,90,20,.55)');
-      g.fillStyle = amb; rr(dx + 0.8, dy + 0.8, dw - 1.6, dh - 1.6, 1.5); g.fill();
-    }
-    g.font = `bold 5.2px "Neucha", "Arial Narrow", sans-serif`; g.textAlign = 'center'; g.textBaseline = 'middle';
-    for (let i = 0; i < 3; i++) {
-      const cx = dx + dw * (i + 0.5) / 3;
-      g.fillStyle = on ? (this.prog === i ? '#3a1504' : 'rgba(70,30,6,.55)') : lit([150, 140, 120]);
-      g.fillText(['1', '2', '3'][i], cx, dy + dh * 0.42);
-      if (on && this.prog === i) { g.fillStyle = '#c42a10'; g.fillRect(cx - 2.2, dy + dh - 4.4, 4.4, 1.6); }
-    }
-    // стекло шкалы
-    const gl = g.createLinearGradient(dx, dy, dx, dy + dh); gl.addColorStop(0, `rgba(255,255,255,${0.22 * lum + 0.04})`); gl.addColorStop(0.45, 'rgba(255,255,255,0)');
-    g.fillStyle = gl; rr(dx, dy, dw, dh, 2); g.fill();
-    // ручка громкости
-    const kx = dx + dw / 2, ky = H - 20, kr = 8.2;
-    g.save();
-    g.shadowColor = 'rgba(20,10,4,.55)'; g.shadowBlur = 3 * k; g.shadowOffsetX = -L.dir * 1.6 * k; g.shadowOffsetY = 1.2 * k;
-    g.fillStyle = lit([190, 176, 150]); g.beginPath(); g.arc(kx, ky, kr, 0, Math.PI * 2); g.fill(); g.restore();
-    for (let i = 0; i < 28; i++) { const a = i / 28 * Math.PI * 2; g.strokeStyle = i % 2 ? lit([150, 136, 112]) : lit([222, 210, 186]); g.lineWidth = 0.7; g.beginPath(); g.moveTo(kx + Math.cos(a) * (kr - 1.3), ky + Math.sin(a) * (kr - 1.3)); g.lineTo(kx + Math.cos(a) * kr, ky + Math.sin(a) * kr); g.stroke(); }
-    const kg = g.createRadialGradient(kx + L.dir * -2.5, ky - 3, 0.5, kx, ky, kr * 0.9);
-    kg.addColorStop(0, lit([252, 246, 230], 1.15)); kg.addColorStop(1, lit([200, 186, 160], 0.9));
-    g.fillStyle = kg; g.beginPath(); g.arc(kx, ky, kr - 1.6, 0, Math.PI * 2); g.fill();
-    const va = (-135 + 270 * state.radioVolume) * Math.PI / 180;
-    g.strokeStyle = lit([80, 60, 40]); g.lineWidth = 1.1; g.lineCap = 'round';
-    g.beginPath(); g.moveTo(kx + Math.sin(va) * 1.5, ky - Math.cos(va) * 1.5); g.lineTo(kx + Math.sin(va) * (kr - 2.6), ky - Math.cos(va) * (kr - 2.6)); g.stroke();
-    // свет сбоку: одна сторона ярче, блик по ребру
-    g.save(); rr(0, 0, W, H, 4.5); g.clip();
-    const side1 = g.createLinearGradient(0, 0, W, 0), a1 = 0.16 * lum / 0.5;
-    side1.addColorStop(0, L.dir < 0 ? `rgba(255,236,200,${a1})` : `rgba(0,0,0,${a1 * 0.9})`);
-    side1.addColorStop(0.5, 'rgba(0,0,0,0)');
-    side1.addColorStop(1, L.dir > 0 ? `rgba(255,236,200,${a1})` : `rgba(0,0,0,${a1 * 0.9})`);
-    g.globalCompositeOperation = 'soft-light'; g.fillStyle = side1; g.fillRect(0, 0, W, H);
-    g.restore();
-    g.strokeStyle = `rgba(255,248,230,${0.18 + 0.4 * lum})`; g.lineWidth = 0.7;
-    g.beginPath(); g.moveTo(4, 0.5); g.lineTo(W - 4, 0.5); g.stroke();
-    g.strokeStyle = 'rgba(30,18,8,.4)'; g.beginPath(); g.moveTo(4, H - 0.4); g.lineTo(W - 4, H - 0.4); g.stroke();
-    // ножки
-    g.fillStyle = 'rgba(18,10,5,.9)'; g.fillRect(8, H - 0.5, 9, 1.6); g.fillRect(W - 17, H - 0.5, 9, 1.6);
-    // зерно и лёгкая потёртость пластика — как у всего на фотографии
-    if (!this.noise) {
-      const n = document.createElement('canvas'); n.width = n.height = 96; const ng = n.getContext('2d'), id = ng.createImageData(96, 96);
-      for (let i = 0; i < id.data.length; i += 4) { const v = 128 + (Math.random() - 0.5) * 120; id.data[i] = id.data[i + 1] = id.data[i + 2] = v; id.data[i + 3] = 255; }
-      ng.putImageData(id, 0, 0); this.noise = n;
-    }
-    g.save(); g.globalCompositeOperation = 'source-atop'; g.globalAlpha = 0.09 * clamp(lum * 2, 0.1, 1);   // только поверх уже нарисованного
-    g.setTransform(1, 0, 0, 1, 0, 0); g.fillStyle = g.createPattern(this.noise, 'repeat');
-    g.beginPath(); g.rect(0, 0, this.cv.width, this.cv.height); g.fill();
-    g.restore();
-  },
-
-  /* ---------- звук ---------- */
-  label() {
-    const T = CFG.text;
-    if (this.prog < 0) return T.radioOff;
-    if (this.needTap) return T.radioTap;
-    const now = CFG.radio.programs[this.prog].name + (this.title ? ' — ' + this.title : '') + (this.loading ? ', ' + T.radioTuning : '');
-    return (this.prog === CFG.radio.programs.length - 1 ? T.radioLast : T.radioNext).replace('{now}', now);
-  },
-  /* Всё, что запускает звук, делаем прямо в обработчике клика, без ожиданий:
-     Safari разрешает play() только «внутри» жеста пользователя. */
-  click() {
-    Sound.start();
-    if (this.needTap && this.au) {                     // браузер не дал запуститься — этот щелчок просто запускает
-      this.needTap = false; this.tryPlay(); this.refresh(); return;
-    }
-    const n = CFG.radio.programs.length;
-    this.select(this.prog + 1 >= n ? -1 : this.prog + 1);
-  },
-  key() {                                          // щелчок клавиши
-    if (!Sound.started) return;
-    const t = Sound.ctx.currentTime + 0.01, pan = -0.25;
-    Sound.burst(t, { dur: 0.03, vol: 0.22, type: 'bandpass', f: 1700, q: 1.4, pan });
-    Sound.burst(t + 0.045, { dur: 0.02, vol: 0.12, type: 'bandpass', f: 2600, q: 2, pan });
-    Sound.tone(t, { f: 180, f2: 90, dur: 0.06, vol: 0.06, pan });
-  },
-  chain() {                                       // «проводной» звук: узкая полоса, маленький динамик, лёгкий перегруз
-    if (this._chain || !Sound.started) return this._chain;
-    const S = Sound, ctx = S.ctx;
-    const inp = S.g(1), hp = S.f('highpass', 170, 0.8), lp = S.f('lowpass', 5200, 0.7), box = S.f('peaking', 950, 1.1), low = S.f('peaking', 260, 1.2);
-    box.gain.value = 4; low.gain.value = 2.5;
-    const sat = ctx.createWaveShaper(); sat.curve = S.softCurve(1.8); sat.oversample = '2x';
-    const vol = S.g(0), pan = S.panner('room', 0, { fixed: true });
-    S.setPos(pan, -0.55, 0.32, -2.6);                     // ниша: чуть левее и выше телевизора
-    pan.refDistance = 2.7;
-    inp.connect(hp).connect(low).connect(box).connect(lp).connect(sat).connect(vol).connect(pan).connect(S.master);
-    vol.connect(S.g(0.38)).connect(S.roomVerb);
-    // тихий фон трансляционной сети: 50 Гц и чуть-чуть шипения
-    const hum = S.o('sine', 50), hg = S.g(0); hum.connect(hg).connect(inp); hum.start();
-    const hiss = S.noise('pink'), hf = S.f('bandpass', 3000, 0.6), hs = S.g(0); hiss.connect(hf).connect(hs).connect(inp); hiss.start(0, Math.random() * 3);
-    return (this._chain = { inp, vol, hg, hs });
-  },
-  /* звук готов (AudioContext поднят) — подключаем элемент к фильтру и включаем фон сети */
-  wire() {
-    if (!Sound.started) return;
-    const c = this.chain();
-    if (this.au && this.au._cors && !this.au._src) {
-      try { this.au._src = Sound.ctx.createMediaElementSource(this.au); this.au._src.connect(c.inp); }
-      catch (_) { this.au._src = null; }
-    }
-    this.bed(this.prog >= 0);
-    this.fade(this.prog >= 0 && !this.loading ? 1 : 0, 0.4);
-  },
-  bed(on) {
-    const c = this.chain(); if (!c) return;
-    const t = Sound.ctx.currentTime;
-    c.hg.gain.setTargetAtTime(on ? 0.006 : 0, t, 0.08); c.hs.gain.setTargetAtTime(on ? 0.012 : 0, t, 0.08);
-  },
-  setVolume(v) {
-    state.radioVolume = clamp(v, 0, 1);
-    try { localStorage.setItem('tubetv.radio', String(state.radioVolume)); } catch (_) {}
-    if (this._chain && this.prog >= 0 && !this.loading) this._chain.vol.gain.setTargetAtTime(state.radioVolume * 1.15, Sound.ctx.currentTime, 0.05);
-    this.syncMute();
-    const mx = $('#mxRadio'); if (mx && +mx.value !== state.radioVolume) mx.value = state.radioVolume;
-    this.draw();
-  },
-  /* простой элемент (без CORS) не проходит через Web Audio: громкость и «без звука» — у него самого.
-     На iPhone volume у элемента только для чтения, поэтому выключаем через muted. */
-  syncMute() {
-    const a = this.au; if (!a || a._cors) return;
-    a.muted = state.muted;
-    try { a.volume = state.radioVolume; } catch (_) {}
-  },
-  /* Аудиоэлемент: сначала — с CORS (звук идёт через фильтр динамика и объём);
-     если архив его не отдаст — обычный элемент без обработки. */
-  audio() {
-    if (this.au) return this.au;
-    const a = new Audio(); a.preload = 'auto';
-    a._cors = !this.noCors;
-    if (a._cors) a.crossOrigin = 'anonymous';
-    a.addEventListener('ended', () => this.au === a && this.next(true));
-    a.addEventListener('playing', () => { if (this.au !== a) return; this.loading = false; this.fails = 0; if (!a._cors) this.plainOk = true; this.fade(1, 0.6); this.refresh(); });
-    a.addEventListener('waiting', () => { if (this.au !== a) return; this.loading = true; this.refresh(); });
-    a.addEventListener('error', () => this.au === a && this.onError());
-    this.au = a;
-    this.syncMute(); this.wire();
-    return a;
-  },
-  drop() {
-    const a = this.au; if (!a) return;
-    this.au = null;
-    try { a.pause(); a.removeAttribute('src'); a.load(); } catch (_) {}
-    if (a._src) try { a._src.disconnect(); } catch (_) {}
-  },
-  onError() {
-    if (this.prog < 0) return;
-    this.fails = (this.fails || 0) + 1;
-    const cors = this.au && this.au._cors;
-    if (cors && !this.plainOk && !this.triedPlain) {
-      // возможно, сервер не прислал CORS — пробуем ту же запись обычным элементом
-      this.triedPlain = true; this.noCors = true; this.drop();
-      return this.start(this.cur, true);
-    }
-    if (!cors && !this.plainOk) { this.noCors = false; this.triedPlain = false; }   // и так не играет — дело не в CORS, возвращаемся к полному звуку
-    if (this.fails < 4) { this.drop(); return setTimeout(() => this.prog >= 0 && this.next(false), 700); }
-    this.loading = false; this.refresh();
-    UI.toast(CFG.text.radioFail, 4000);
-  },
-  select(i) {
-    this.key();
-    this.prog = i; this.fails = 0; this.needTap = false;
-    this.draw(); this.el && this.el.classList.toggle('on', i >= 0);
-    document.body.classList.toggle('radio-on', i >= 0);
-    if (i < 0) {
-      this.title = ''; this.loading = false;
-      const a = this.au;
-      if (a) { this.fade(0, 0.25); setTimeout(() => { if (this.prog < 0) a.pause(); }, 400); }
-      this.bed(false); this.refresh();
-      return;
-    }
-    if (!Sound.started) Sound.start().then(() => this.wire());
-    this.bed(true);
-    this.next(false);
-  },
-  fade(to, sec) {
-    if (this._chain) this._chain.vol.gain.setTargetAtTime(to * state.radioVolume * 1.15, Sound.ctx.currentTime, Math.max(0.01, sec / 3));
-  },
-  next(sequential) {
-    const P = CFG.radio.programs[this.prog]; if (!P) return;
-    let idx;
-    if (sequential && this.idx != null) idx = (this.idx + 1) % P.items.length;
-    else { idx = irand(0, P.items.length - 1); if (P.items.length > 1 && idx === this.idx && this.lastProg === this.prog) idx = (idx + 1) % P.items.length; }
-    this.idx = idx; this.lastProg = this.prog;
-    this.start(P.items[idx], !sequential);
-  },
-  start(it, seekRandom) {
-    this.cur = it;
-    const a = this.audio(), url = CFG.radio.base + it.u.split('/').map(encodeURIComponent).join('/');
-    this.title = it.t; this.loading = true; this.refresh();
-    this.fade(0, 0.05);
-    if (a._onMeta) a.removeEventListener('loadedmetadata', a._onMeta);
-    a._onMeta = () => {
-      a.removeEventListener('loadedmetadata', a._onMeta); a._onMeta = null;
-      if (seekRandom && isFinite(a.duration) && a.duration > 240) {
-        const span = a.duration - 120;
-        try { a.currentTime = (it.long ? rand(0.05, 0.92) : rand(0, 0.6)) * span; } catch (_) {}
-      }
-    };
-    a.addEventListener('loadedmetadata', a._onMeta);
-    a.src = url;
-    this.tryPlay();
-  },
-  tryPlay() {
-    const a = this.au; if (!a) return;
-    const p = a.play();
-    if (p && p.catch) p.catch(err => {
-      if (this.au !== a || this.prog < 0) return;
-      if (err && err.name === 'NotAllowedError') { this.needTap = true; this.loading = false; this.refresh(); if (Zones.els.radio) Zones.showCaption(Zones.els.radio, 3500); }
-    });
-  },
-  refresh() {
-    const z = Zones.els && Zones.els.radio; if (!z) return;
-    z.setAttribute('aria-label', this.label());
-    if (HOVER && z.matches(':hover')) Zones.showCaption(z);
-  },
-};
-
-/* ==========================================================================
-   7d. БУДИЛЬНИК И ОТРЫВНОЙ КАЛЕНДАРЬ
-   Оба нарисованы кодом и освещены так же, как радиоточка (свет ниши по сцене).
-   Будильник на телевизоре справа показывает настоящее время и звенит по щелчку;
-   календарик висит на гвоздике в нише — сегодняшнее число, только год 1995-й;
-   листок можно оторвать.
-   ========================================================================== */
-const MONTHS = ['ЯНВАРЬ', 'ФЕВРАЛЬ', 'МАРТ', 'АПРЕЛЬ', 'МАЙ', 'ИЮНЬ', 'ИЮЛЬ', 'АВГУСТ', 'СЕНТЯБРЬ', 'ОКТЯБРЬ', 'НОЯБРЬ', 'ДЕКАБРЬ'];
-const MONTHS_GEN = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
-const WEEKDAYS = ['ВОСКРЕСЕНЬЕ', 'ПОНЕДЕЛЬНИК', 'ВТОРНИК', 'СРЕДА', 'ЧЕТВЕРГ', 'ПЯТНИЦА', 'СУББОТА'];
-/* восход и заход солнца в Москве (формулы NOAA, точность ±2 мин) */
-function sunTimes(date, lat = 55.75, lon = 37.62, tz = 3) {
-  const rad = Math.PI / 180, start = Date.UTC(date.getFullYear(), 0, 0);
-  const N = Math.floor((Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) - start) / 864e5);
-  const g = 2 * Math.PI / 365 * (N - 1);
-  const eq = 229.18 * (0.000075 + 0.001868 * Math.cos(g) - 0.032077 * Math.sin(g) - 0.014615 * Math.cos(2 * g) - 0.040849 * Math.sin(2 * g));
-  const dec = 0.006918 - 0.399912 * Math.cos(g) + 0.070257 * Math.sin(g) - 0.006758 * Math.cos(2 * g) + 0.000907 * Math.sin(2 * g) - 0.002697 * Math.cos(3 * g) + 0.00148 * Math.sin(3 * g);
-  const ha = Math.acos(Math.cos(90.833 * rad) / (Math.cos(lat * rad) * Math.cos(dec)) - Math.tan(lat * rad) * Math.tan(dec)) / rad;
-  const fmt = m => { m = (m + 1440) % 1440; return `${Math.floor(m / 60)}:${String(Math.round(m % 60)).padStart(2, '0')}`; };
-  return { rise: fmt(720 - 4 * (lon + ha) - eq + tz * 60), set: fmt(720 - 4 * (lon - ha) - eq + tz * 60) };
-}
-
-const Props = {
-  init() {
-    this.clock = this.mk('clock', CFG.props.clock.box, 'prop-clock');
-    this.cal = this.mk('calendar', CFG.props.calendar.box, 'prop-cal');
-    this.day = this.day || this.today();
-    this.resize();
-    addEventListener('resize', () => this.resize());
-    this._sec = -1;
-  },
-  mk(id, box, cls) {
-    const [x, y, w, h] = box;
-    const el = document.createElement('div'); el.className = 'prop ' + cls;
-    Object.assign(el.style, { left: x / IMG_W * 100 + '%', top: y / IMG_H * 100 + '%', width: w / IMG_W * 100 + '%', height: h / IMG_H * 100 + '%' });
-    el.innerHTML = '<canvas></canvas>';
-    stageEl.insertBefore(el, $('#glow'));
-    const cv = el.querySelector('canvas');
-    return { id, el, cv, g: cv.getContext('2d'), box };
-  },
-  resize() {
-    const k = Math.min(4, state.stage.u * (devicePixelRatio || 1) * (Camera.seated ? state.zoom || 1 : 1));
-    for (const o of [this.clock, this.cal]) {
-      if (!o) continue;
-      const W = Math.round(o.box[2] * k), H = Math.round(o.box[3] * k);
-      if (o.cv.width !== W || o.cv.height !== H) { o.cv.width = W; o.cv.height = H; }
-      o.k = k;
-    }
-    this.draw(true);
-  },
-  update(t) {
-    const s = Math.floor(Date.now() / 1000);
-    const relit = !!Radio.lightTo;                          // свет сцены меняется — перерисовываем
-    if (s !== this._sec || relit) { this._sec = s; this.drawClock(); if (relit) this.drawCal(); if (!relit) this.tick(); }
-  },
-  draw() { this.drawClock(); this.drawCal(); },
-  L() { return Radio.light || { c: [0.5, 0.45, 0.4], dir: 0.5 }; },
-  lit(rgb, s = 1) { const L = this.L(); return `rgb(${rgb.map((v, i) => clamp(Math.round(v * L.c[i] * s), 0, 255)).join(',')})`; },
-
-  /* ---------- будильник ---------- */
-  drawClock() {
-    const o = this.clock; if (!o) return;
-    const g = o.g, k = o.k, L = this.L(), lum = L.c[0] * 0.3 + L.c[1] * 0.59 + L.c[2] * 0.11;
-    g.setTransform(1, 0, 0, 1, 0, 0); g.clearRect(0, 0, o.cv.width, o.cv.height);
-    const sh = this.shake || 0, jx = sh ? (Math.random() - 0.5) * 1.6 * sh : 0, jr = sh ? (Math.random() - 0.5) * 0.05 * sh : 0;
-    g.setTransform(k, 0, 0, k, (44 + jx) * k, 50 * k); g.rotate(jr);
-    const R = 26, lit = (c, s) => this.lit(c, s);
-    // тень на стенку и на крышку телевизора
-    g.save(); g.shadowColor = 'rgba(8,4,2,.55)'; g.shadowBlur = 8 * k; g.shadowOffsetX = -L.dir * 6 * k; g.shadowOffsetY = 1 * k;
-    g.fillStyle = '#000'; g.beginPath(); g.arc(0, 0, R, 0, Math.PI * 2); g.fill(); g.restore();
-    g.clearRect(-R - 1, -R - 1, 2 * R + 2, 2 * R + 2);
-    g.save(); g.globalAlpha = 0.55; const cs = g.createRadialGradient(0, R + 9, 1, 0, R + 9, 30); cs.addColorStop(0, 'rgba(10,5,2,.9)'); cs.addColorStop(1, 'rgba(10,5,2,0)');
-    g.fillStyle = cs; g.scale(1, 0.18); g.fillRect(-34, (R + 2) / 0.18, 68, 14 / 0.18); g.restore();
-    // ножки
-    for (const s of [-1, 1]) { g.fillStyle = lit([200, 200, 205], 0.9); g.beginPath(); g.ellipse(s * 15, R + 4, 4, 3, 0, 0, Math.PI * 2); g.fill(); g.fillStyle = lit([120, 120, 125]); g.fillRect(s * 15 - 1.5, R - 2, 3, 5); }
-    // звонки-чашки и молоточек
-    const chrome = (x0, y0, r) => { const gr = g.createRadialGradient(x0 - r * 0.35 * (L.dir < 0 ? 1 : -1), y0 - r * 0.4, r * 0.1, x0, y0, r);
-      gr.addColorStop(0, lit([255, 255, 255], 1.25)); gr.addColorStop(0.45, lit([190, 192, 200])); gr.addColorStop(1, lit([70, 72, 80])); return gr; };
-    for (const s of [-1, 1]) {
-      const bx = s * 17, by = -R - 3;
-      g.fillStyle = lit([150, 150, 155]); g.fillRect(bx - 1, by + 6, 2, 6);
-      g.fillStyle = chrome(bx, by, 12); g.beginPath(); g.arc(bx, by + 3, 11.5, Math.PI, 0); g.closePath(); g.fill();
-      g.fillStyle = lit([90, 90, 98]); g.fillRect(bx - 11.5, by + 2.4, 23, 1.2);
-      g.fillStyle = lit([235, 235, 240], 1.1); g.beginPath(); g.arc(bx, by - 8.5, 1.6, 0, Math.PI * 2); g.fill();
-    }
-    const hammer = this.ringing ? Math.sin(nowMs() / 18) * 5 : 0;
-    g.strokeStyle = lit([160, 160, 168]); g.lineWidth = 1.4; g.beginPath(); g.moveTo(0, -R + 2); g.lineTo(hammer, -R - 9); g.stroke();
-    g.fillStyle = lit([200, 200, 208]); g.beginPath(); g.arc(hammer, -R - 9.5, 2, 0, Math.PI * 2); g.fill();
-    // ручка-дужка
-    g.strokeStyle = chrome(0, -R - 14, 18); g.lineWidth = 2.2; g.beginPath(); g.ellipse(0, -R - 4, 13, 12, 0, Math.PI * 1.08, Math.PI * 1.92); g.stroke();
-    // корпус — красная эмаль
-    const body = g.createRadialGradient(-L.dir * 9, -12, 3, 0, 0, R * 1.05);
-    body.addColorStop(0, lit([235, 70, 52], 1.15)); body.addColorStop(0.6, lit([168, 30, 26])); body.addColorStop(1, lit([90, 14, 12]));
-    g.fillStyle = body; g.beginPath(); g.arc(0, 0, R, 0, Math.PI * 2); g.fill();
-    // ободок
-    g.lineWidth = 3; g.strokeStyle = chrome(0, 0, R); g.beginPath(); g.arc(0, 0, R - 2.6, 0, Math.PI * 2); g.stroke();
-    // циферблат
-    const dial = g.createRadialGradient(-4, -6, 2, 0, 0, R - 4);
-    dial.addColorStop(0, lit([252, 248, 236], 1.08)); dial.addColorStop(1, lit([214, 206, 186]));
-    g.fillStyle = dial; g.beginPath(); g.arc(0, 0, R - 4.2, 0, Math.PI * 2); g.fill();
-    for (let i = 0; i < 60; i++) {
-      const a = i / 60 * Math.PI * 2, big = i % 5 === 0, r0 = big ? R - 8.4 : R - 6.6;
-      g.strokeStyle = lit([30, 26, 22]); g.lineWidth = big ? 1.1 : 0.45;
-      g.beginPath(); g.moveTo(Math.sin(a) * r0, -Math.cos(a) * r0); g.lineTo(Math.sin(a) * (R - 5.4), -Math.cos(a) * (R - 5.4)); g.stroke();
-    }
-    g.fillStyle = lit([28, 24, 20]); g.font = `bold 6.4px "Arial Narrow", Arial, sans-serif`; g.textAlign = 'center'; g.textBaseline = 'middle';
-    for (const [n, a] of [[12, 0], [3, 90], [6, 180], [9, 270]]) { const r = R - 12.5, ar = a * Math.PI / 180; g.fillText(String(n), Math.sin(ar) * r, -Math.cos(ar) * r + 0.3); }
-    g.font = `3px Arial, sans-serif`; g.fillStyle = lit([120, 40, 30]); g.fillText('17 КАМНЕЙ', 0, 7);
-    // стрелки: настоящее время
-    const now = new Date(), sec = now.getSeconds(), min = now.getMinutes() + sec / 60, hr = (now.getHours() % 12) + min / 60;
-    const hand = (ang, len, wdt, col, tail = 3) => { g.save(); g.rotate(ang); g.fillStyle = col; g.beginPath(); g.moveTo(-wdt / 2, tail); g.lineTo(-wdt * 0.32, -len); g.lineTo(0, -len - 1.6); g.lineTo(wdt * 0.32, -len); g.lineTo(wdt / 2, tail); g.closePath(); g.fill(); g.restore(); };
-    g.save(); g.shadowColor = 'rgba(0,0,0,.35)'; g.shadowBlur = 1.5 * k; g.shadowOffsetX = -L.dir * 1 * k; g.shadowOffsetY = 0.8 * k;
-    hand(-0.6, 9, 1.4, lit([200, 160, 60]), 2);                                   // стрелка будильника — на 6:55
-    hand(hr / 12 * Math.PI * 2, 10.5, 2.4, lit([22, 20, 18]));
-    hand(min / 60 * Math.PI * 2, 15.5, 1.8, lit([22, 20, 18]));
-    g.save(); g.rotate(sec / 60 * Math.PI * 2); g.strokeStyle = lit([200, 30, 24], 1.1); g.lineWidth = 0.5; g.beginPath(); g.moveTo(0, 4); g.lineTo(0, -17.5); g.stroke(); g.restore();
-    g.restore();
-    g.fillStyle = lit([60, 55, 50]); g.beginPath(); g.arc(0, 0, 1.3, 0, Math.PI * 2); g.fill();
-    // стекло: блик
-    g.save(); g.beginPath(); g.arc(0, 0, R - 4.2, 0, Math.PI * 2); g.clip();
-    const gl = g.createLinearGradient(-R, -R, R * 0.2, R * 0.4); gl.addColorStop(0, `rgba(255,255,255,${0.32 * lum + 0.05})`); gl.addColorStop(0.45, 'rgba(255,255,255,0)');
-    g.fillStyle = gl; g.fillRect(-R, -R, 2 * R, 2 * R); g.restore();
-    g.strokeStyle = `rgba(255,250,240,${0.25 + 0.5 * lum})`; g.lineWidth = 0.8; g.beginPath(); g.arc(0, 0, R - 0.6, Math.PI * (L.dir < 0 ? 1.05 : 1.6), Math.PI * (L.dir < 0 ? 1.5 : 1.95)); g.stroke();
-  },
-  tick() {
-    if (!Sound.started || this.ringing || document.hidden) return;
-    const t = Sound.ctx.currentTime + 0.01, n = state.mode === 'night' ? 1 : state.mode === 'evening' ? 0.7 : 0.45;
-    Sound.burst(t, { dur: 0.008, vol: 0.05 * n, type: 'bandpass', f: (this._sec & 1) ? 3600 : 4300, q: 6, dest: Sound.sfx, pan: 0.3 });
-  },
-  ring() {
-    if (this.ringing) return;
-    this.ringing = true; Sound.start();
-    const dur = 2.6, t0 = nowMs();
-    if (Sound.started) {
-      const t = Sound.ctx.currentTime + 0.02, pan = 0.3;
-      for (let i = 0; i < dur * 22; i++) {                  // молоточек бьёт по двум чашкам ~22 раза в секунду
-        const tt = t + i / 22, a = i % 2 ? 2620 : 3180, v = 0.05 * (1 - smooth(dur - 0.4, dur, i / 22));
-        Sound.tone(tt, { f: a, dur: 0.12, vol: v, dest: Sound.sfx, pan });
-        Sound.tone(tt, { f: a * 2.76, dur: 0.05, vol: v * 0.35, dest: Sound.sfx, pan });
-        Sound.burst(tt, { dur: 0.004, vol: v * 0.8, f: 5200, q: 2, dest: Sound.sfx, pan });
-      }
-    }
-    const step = () => {
-      const k = (nowMs() - t0) / 1000;
-      this.shake = k < dur ? 1 - smooth(dur - 0.5, dur, k) : 0;
-      this.drawClock();
-      if (k < dur) requestAnimationFrame(step); else { this.ringing = false; this.shake = 0; this.drawClock(); }
-    };
-    requestAnimationFrame(step);
-  },
-  clockLabel() { const n = new Date(); return `Будильник. Сейчас ${n.getHours()}:${String(n.getMinutes()).padStart(2, '0')} — щёлкните, чтобы проверить звонок`; },
-
-  /* ---------- отрывной календарь ---------- */
-  drawCal(target, date) {
-    const o = this.cal; if (!o) return;
-    const g = target || o.g, k = o.k, L = this.L(), lit = (c, s) => this.lit(c, s);
-    const W = o.box[2], H = o.box[3];
-    if (!target) { g.setTransform(1, 0, 0, 1, 0, 0); g.clearRect(0, 0, o.cv.width, o.cv.height); }
-    g.setTransform(k, 0, 0, k, 0, 0);
-    const d = date || this.day, sunday = d.getDay() === 0, red = sunday || (d.getMonth() === 0 && d.getDate() <= 2);
-    const bx = 6, by = 8, bw = W - 12, bh = H - 14;
-    if (!target) {
-      // тень на стенку
-      g.save(); g.shadowColor = 'rgba(8,4,2,.5)'; g.shadowBlur = 5 * k; g.shadowOffsetX = -L.dir * 3 * k; g.shadowOffsetY = 2 * k;
-      g.fillStyle = '#000'; g.fillRect(bx, by, bw, bh); g.restore();
-      // картонная основа — бордовая, с золотым тиснением
-      g.fillStyle = lit([120, 30, 34]); g.fillRect(bx, by, bw, bh);
-      g.strokeStyle = lit([210, 168, 80]); g.lineWidth = 0.6; g.strokeRect(bx + 2, by + 2, bw - 4, 13);
-      g.fillStyle = lit([226, 186, 96]); g.font = `bold 4.6px "Arial Narrow", Arial, sans-serif`; g.textAlign = 'center'; g.textBaseline = 'middle';
-      g.fillText('1995', bx + bw / 2, by + 8.8);
-      // гвоздик и дырочка
-      g.fillStyle = lit([40, 30, 26]); g.beginPath(); g.arc(W / 2, 4.5, 1.6, 0, Math.PI * 2); g.fill();
-      g.fillStyle = lit([200, 200, 205], 1.2); g.beginPath(); g.arc(W / 2 - 0.4, 4.1, 0.7, 0, Math.PI * 2); g.fill();
-      g.strokeStyle = lit([30, 22, 18]); g.lineWidth = 0.5; g.beginPath(); g.moveTo(W / 2, 5); g.lineTo(bx + bw / 2 - 6, by + 0.5); g.moveTo(W / 2, 5); g.lineTo(bx + bw / 2 + 6, by + 0.5); g.stroke();
-      // торцы стопки листков
-      for (let i = 0; i < 5; i++) { g.fillStyle = lit(i % 2 ? [205, 200, 186] : [232, 228, 214]); g.fillRect(bx + 4, by + bh - 3.6 + i * 0.7, bw - 8, 0.7); }
-    }
-    // верхний листок
-    const px = bx + 4, py = by + 18, pw = bw - 8, ph = bh - 22;
-    const paper = g.createLinearGradient(px, py, px + pw, py + ph);
-    paper.addColorStop(0, lit([248, 244, 232], 1.05)); paper.addColorStop(1, lit([226, 220, 204]));
-    g.fillStyle = paper; g.fillRect(px, py, pw, ph);
-    g.strokeStyle = lit([180, 172, 156]); g.lineWidth = 0.3; g.strokeRect(px, py, pw, ph);
-    const ink = red ? lit([196, 30, 30], 1.1) : lit([26, 24, 22]);
-    g.textAlign = 'center'; g.textBaseline = 'middle';
-    g.fillStyle = lit([196, 30, 30], 1.1); g.font = `bold 4.2px "Arial Narrow", Arial, sans-serif`;
-    g.fillText(MONTHS[d.getMonth()], px + pw / 2, py + 4.2);
-    g.fillStyle = ink; g.font = `bold 19px "Arial Narrow", "Times New Roman", serif`;
-    g.fillText(String(d.getDate()), px + pw / 2, py + ph / 2 + 0.5);
-    g.font = `bold 3.6px "Arial Narrow", Arial, sans-serif`;
-    g.fillText(WEEKDAYS[d.getDay()], px + pw / 2, py + ph - 7.4);
-    const st = sunTimes(d);
-    g.fillStyle = lit([90, 84, 76]); g.font = `2.6px Arial, sans-serif`;
-    g.fillText(`восх. ${st.rise}  зах. ${st.set}`, px + pw / 2, py + ph - 3);
-  },
-  today() { const now = new Date(); return new Date(1995, now.getMonth(), now.getDate()); },
-  calLabel() {
-    const d = this.day || (this.day = this.today()), st = sunTimes(d);
-    return `Отрывной календарь: ${d.getDate()} ${MONTHS_GEN[d.getMonth()]} 1995, ${WEEKDAYS[d.getDay()].toLowerCase()}. Восход ${st.rise}, заход ${st.set}. Щёлкните — оторвать листок`;
-  },
-  tear() {
-    if (this.tearing) return;
-    this.tearing = true; Sound.start();
-    const o = this.cal, k = o.k;
-    // листок — отдельный холст, который отрывается и падает
-    const sheet = document.createElement('canvas'); sheet.width = o.cv.width; sheet.height = o.cv.height; sheet.className = 'cal-sheet';
-    this.drawCal(sheet.getContext('2d'), this.day);
-    o.el.appendChild(sheet);
-    if (Sound.started) {                                     // шорох и треск рвущейся бумаги
-      const t = Sound.ctx.currentTime + 0.01;
-      for (let i = 0; i < 9; i++) Sound.burst(t + i * 0.018 + Math.random() * 0.01, { dur: 0.02, vol: 0.05 + Math.random() * 0.05, type: 'bandpass', f: 2500 + Math.random() * 3000, q: 1.2, dest: Sound.sfx, pan: 0.15 });
-      Sound.burst(t + 0.2, { dur: 0.35, vol: 0.03, type: 'highpass', f: 3000, dest: Sound.sfx, pan: 0.1 });
-    }
-    this.day = new Date(this.day.getFullYear(), this.day.getMonth(), this.day.getDate() + 1);
-    this.drawCal();
-    const dir = Math.random() < 0.5 ? -1 : 1;
-    wa(sheet, [
-      { transform: 'translate(0,0) rotate(0deg)', opacity: 1, offset: 0 },
-      { transform: `translate(${dir * 6}%, -6%) rotate(${dir * 8}deg)`, opacity: 1, offset: 0.18 },
-      { transform: `translate(${dir * 40}%, 160%) rotate(${dir * 70}deg)`, opacity: 0.9, offset: 0.8 },
-      { transform: `translate(${dir * 55}%, 240%) rotate(${dir * 95}deg)`, opacity: 0, offset: 1 },
-    ], { duration: 1500, easing: 'cubic-bezier(.3,.1,.6,1)' }).then(() => { sheet.remove(); this.tearing = false; });
-    Zones.refreshLabels();
-    const z = Zones.els.calendar; if (z) Zones.showCaption(z, 3200);
-  },
-};
-
-/* ==========================================================================
-   7e. ВИДЕОМАГНИТОФОН
-   Стоит на полу под телевизором. Корпус дорисовывается прямо в картинки сцен
-   (до загрузки в WebGL), поэтому его освещает тот же расчёт, что и комнату:
-   на закате по нему ползут те же пятна, ночью — фонарь. Сверху — только то,
-   что светится само: табло и кассета, которая въезжает в щель.
-   ========================================================================== */
-const VCR = {
-  loaded: false,
-  /* 3D-коробка (метры, камера в начале координат): x0..x1, высота h1, перед z0, зад z1 */
-  box() { const B = CFG.vcr; return { x0: B.x - B.w / 2, x1: B.x + B.w / 2, h1: B.h, z0: -B.z, z1: -(B.z + B.d) }; },
-  proj(x, h, z) { const R = CFG.room; return [R.cx + R.f * x / -z, R.cy - R.f * (h - R.camH) / -z]; },
-  rects() {
-    const b = this.box();
-    const fl = this.proj(b.x0, b.h1, b.z0), fr = this.proj(b.x1, 0, b.z0);
-    const tl = this.proj(b.x0, b.h1, b.z1), tr = this.proj(b.x1, b.h1, b.z1);
-    return { front: [fl[0], fl[1], fr[0] - fl[0], fr[1] - fl[1]], top: [fl, [fr[0], fl[1]], tr, tl] };
-  },
-  /* корпус в «альбедо» (без света): передняя панель и крышка */
-  paint(g, E) {
-    const { front: [x, y, w, h], top } = this.rects();
-    const c = (rgb, k = 1) => `rgb(${rgb.map((v, i) => clamp(Math.round(255 * Math.pow(Math.pow(v / 255, 2.2) * E[i] * k, 1 / 2.2)), 0, 255)).join(',')})`;
-    // тень на пол вокруг (контактная)
-    g.save();
-    const sh = g.createRadialGradient(x + w / 2, y + h, 2, x + w / 2, y + h, w * 0.62);
-    sh.addColorStop(0, 'rgba(0,0,0,.55)'); sh.addColorStop(1, 'rgba(0,0,0,0)');
-    g.fillStyle = sh; g.translate(0, y + h); g.scale(1, 0.16); g.fillRect(x - 30, -60, w + 60, 120); g.restore();
-    // крышка
-    g.fillStyle = c([62, 62, 66], 1.15);
-    g.beginPath(); g.moveTo(...top[0]); g.lineTo(...top[1]); g.lineTo(...top[2]); g.lineTo(...top[3]); g.closePath(); g.fill();
-    g.strokeStyle = c([40, 40, 44]); g.lineWidth = 0.6;
-    for (let i = 0; i < 9; i++) {                     // решётка вентиляции у заднего края
-      const t = 0.18 + i * 0.075, a = lerp2(top[3], top[0], 0.15), b = lerp2(top[2], top[1], 0.15);
-      const p0 = lerp2(top[3], top[2], t), p1 = lerp2(a, b, t);
-      g.beginPath(); g.moveTo(...p0); g.lineTo(...p1); g.stroke();
-    }
-    // передняя панель
-    const gr = g.createLinearGradient(0, y, 0, y + h);
-    gr.addColorStop(0, c([88, 88, 94])); gr.addColorStop(0.12, c([58, 58, 63])); gr.addColorStop(1, c([36, 36, 40]));
-    g.fillStyle = gr; g.fillRect(x, y, w, h);
-    g.fillStyle = c([170, 170, 178], 1.1); g.fillRect(x, y + h * 0.1, w, 0.8);          // хромированная линия
-    // кассетоприёмник
-    const sx = x + w * 0.06, sy = y + h * 0.24, sw = w * 0.44, shh = h * 0.34;
-    g.fillStyle = c([14, 14, 16]); g.fillRect(sx, sy, sw, shh);
-    g.fillStyle = c([150, 150, 158]); g.fillRect(sx, sy, sw, 0.7);
-    g.fillStyle = c([26, 26, 30]); g.fillRect(sx + 1, sy + shh * 0.45, sw - 2, 0.6);
-    // надписи
-    g.fillStyle = c([226, 226, 230], 1.1); g.font = `bold ${h * 0.2}px "Arial Narrow", Arial, sans-serif`; g.textBaseline = 'middle';
-    g.fillText('ЛУЧ', sx, y + h * 0.79);
-    g.fillStyle = c([150, 150, 160]); g.font = `${h * 0.11}px Arial, sans-serif`;
-    g.fillText('VIDEO  HQ  4 HEAD', sx + w * 0.11, y + h * 0.8);
-    // окно табло (само светится — рисуется поверх отдельно)
-    const dx = x + w * 0.56, dy = y + h * 0.2, dw = w * 0.36, dh = h * 0.32;
-    g.fillStyle = c([10, 14, 14]); g.fillRect(dx, dy, dw, dh);
-    g.fillStyle = c([120, 120, 128]); g.fillRect(dx, dy + dh, dw, 0.5);
-    // кнопки
-    const labels = ['◀◀', '▶', '■', '▶▶', '⏏'];
-    for (let i = 0; i < 5; i++) {
-      const bx = dx + i * dw / 5 + 0.8, bw = dw / 5 - 1.6, by = y + h * 0.64, bh = h * 0.16;
-      g.fillStyle = c([176, 176, 184], 1.05); g.fillRect(bx, by, bw, bh);
-      g.fillStyle = c([90, 90, 98]); g.fillRect(bx, by + bh - 0.6, bw, 0.6);
-      g.fillStyle = c([40, 40, 44]); g.font = `${bh * 0.8}px Arial, sans-serif`; g.textAlign = 'center';
-      g.fillText(labels[i], bx + bw / 2, by + bh * 0.55); g.textAlign = 'left';
-    }
-    // кнопка питания
-    g.fillStyle = c([180, 180, 186]); g.fillRect(x + w * 0.52, y + h * 0.26, w * 0.025, h * 0.14);
-    // ножки
-    g.fillStyle = c([20, 20, 22]); g.fillRect(x + w * 0.05, y + h - 1.2, w * 0.1, 1.2); g.fillRect(x + w * 0.85, y + h - 1.2, w * 0.1, 1.2);
-  },
-  /* Дорисовать видик и пачку драже в картинку сцены. Для дня — с учётом «старого солнца»:
-     там, где на фото лежало пятно, предмет тоже в пятне (×(1+Lold)); потом расчёт это пятно снимет. */
-  compose(img, unit, sunImg, plate) {
-    const scene = { uDay: 'day', uEve: 'evening', uOver: 'overcast', uStorm: 'storm' }[unit];
-    const E = CFG.vcr.light[scene] || [0.4, 0.4, 0.4];
-    const cv = document.createElement('canvas'); cv.width = img.naturalWidth || IMG_W; cv.height = img.naturalHeight || IMG_H;
-    const g = cv.getContext('2d'); g.drawImage(img, 0, 0, cv.width, cv.height);
-    g.save(); g.scale(cv.width / IMG_W, cv.height / IMG_H);
-    if (plate && plate.complete && plate.naturalWidth) g.drawImage(plate, 936, 414, 71, 104);   // старой пачки больше нет
-    const layer = document.createElement('canvas'); layer.width = IMG_W; layer.height = IMG_H;
-    const lg = layer.getContext('2d', { willReadFrequently: true });
-    this.paint(lg, E);
-    lg.save(); lg.translate(936, 414); lg.globalAlpha = 0.9; Pack.draw(lg, 1, Pack.LIGHT[scene] || Pack.LIGHT.day, scene === 'evening' ? -1 : 0.6); lg.restore();   // за стеклом витрины — отражения чуть проступают
-    if (unit === 'uDay' && sunImg) {
-      const sm = document.createElement('canvas'); sm.width = IMG_W; sm.height = IMG_H;
-      const sg = sm.getContext('2d', { willReadFrequently: true }); sg.drawImage(sunImg, 0, 0, IMG_W, IMG_H);
-      const { front: [x, y, w, h] } = this.rects();
-      for (const [sx, sy, sw, shh] of [[Math.floor(x - 40), Math.floor(y - 30), Math.ceil(w + 80), Math.ceil(h + 50)], [930, 408, 84, 116]]) {
-        try {
-          const L = sg.getImageData(sx, sy, sw, shh).data, P = lg.getImageData(sx, sy, sw, shh);
-          for (let i = 0; i < P.data.length; i += 4) {
-            if (!P.data[i + 3]) continue;
-            const v = L[i] / 255, k = Math.pow(1 + 12 * v * v, 1 / 2.2);
-            P.data[i] = Math.min(255, P.data[i] * k); P.data[i + 1] = Math.min(255, P.data[i + 1] * k); P.data[i + 2] = Math.min(255, P.data[i + 2] * k);
-          }
-          lg.putImageData(P, sx, sy);
-        } catch (_) {}
-      }
-    }
-    g.drawImage(layer, 0, 0);
-    g.restore();
-    return cv;
-  },
-  /* ---------- живые части: табло и кассета ---------- */
-  init() {
-    if (!CFG.vcr) return;
-    const { front: [x, y, w, h] } = this.rects();
-    this.r = { x, y, w, h };
-    const el = this.el = document.createElement('div'); el.className = 'vcr-live';
-    const pad = 4;
-    Object.assign(el.style, { left: (x - pad) / IMG_W * 100 + '%', top: (y - 30) / IMG_H * 100 + '%', width: (w + 2 * pad) / IMG_W * 100 + '%', height: (h + 30 + pad) / IMG_H * 100 + '%' });
-    el.innerHTML = '<canvas></canvas>';
-    stageEl.insertBefore(el, $('#glow'));
-    this.cv = el.querySelector('canvas'); this.g = this.cv.getContext('2d');
-    this.geo = { x: x - pad, y: y - 30, w: w + 2 * pad, h: h + 30 + pad };
-    this.resize(); addEventListener('resize', () => this.resize());
-    this.mode = 'clock'; this.counter = 0; this.p = 0; this.cas = 0;
-  },
-  resize() {
-    if (!this.cv) return;
-    const k = Math.min(4, state.stage.u * (devicePixelRatio || 1) * (Camera.seated ? state.zoom || 1 : 1));
-    const W = Math.round(this.geo.w * k), H = Math.round(this.geo.h * k);
-    if (this.cv.width !== W || this.cv.height !== H) { this.cv.width = W; this.cv.height = H; }
-    this.k = k; this.draw();
-  },
-  update(t) {
-    if (!this.cv) return;
-    const s = Math.floor(t / 500);
-    if (s !== this._s || this.anim) { this._s = s; this.draw(t); }
-  },
-  draw(t = nowMs()) {
-    const g = this.g, k = this.k, { x, y, w, h } = this.r; if (!g) return;
-    g.setTransform(1, 0, 0, 1, 0, 0); g.clearRect(0, 0, this.cv.width, this.cv.height);
-    g.setTransform(k, 0, 0, k, -this.geo.x * k, -this.geo.y * k);
-    // табло: зелёно-голубые люминесцентные цифры
-    const dx = x + w * 0.56, dy = y + h * 0.2, dw = w * 0.36, dh = h * 0.32;
-    const n = new Date(); let txt;
-    if (this.mode === 'load') txt = 'LOAD';
-    else if (this.mode === 'eject') txt = 'EJECT';
-    else if (this.mode === 'play') { const c = Math.floor(this.counter + (t - this.t0) / 1000); txt = `▶ ${Math.floor(c / 3600)}:${String(Math.floor(c / 60) % 60).padStart(2, '0')}:${String(c % 60).padStart(2, '0')}`; }
-    else txt = (n.getSeconds() % 2 ? `${String(n.getHours()).padStart(2, '0')}:${String(n.getMinutes()).padStart(2, '0')}` : `${String(n.getHours()).padStart(2, '0')} ${String(n.getMinutes()).padStart(2, '0')}`);
-    const dim = state.mode === 'night' || state.mode === 'evening' ? 1 : 0.8;
-    g.save(); g.beginPath(); g.rect(dx, dy, dw, dh); g.clip();
-    g.font = `bold ${dh * 0.72}px "Press Start 2P", monospace`; g.textAlign = 'center'; g.textBaseline = 'middle';
-    g.shadowColor = `rgba(90,255,230,${0.9 * dim})`; g.shadowBlur = 3 * k;
-    g.fillStyle = `rgba(150,255,235,${0.92 * dim})`; g.fillText(txt, dx + dw / 2, dy + dh / 2 + 0.3);
-    g.restore();
-    // кассета: в щели виден её торец с наклейкой; пока не задвинута — торчит из щели к нам
-    if (this.cas > 0.001) {
-      const sx = x + w * 0.06, sy = y + h * 0.24, sw = w * 0.44, shh = h * 0.34, p = this.p;
-      const L = Radio.light ? Radio.light.c : [0.4, 0.4, 0.4];
-      const lc = (rgb, kk = 1.6) => `rgb(${rgb.map((v, i) => clamp(Math.round(v * L[i] * kk), 0, 255)).join(',')})`;
-      g.save(); g.globalAlpha = this.cas;
-      const ex = p * 7, cx0 = sx + sw * 0.05, cw = sw * 0.9;
-      g.fillStyle = lc([30, 30, 33]); g.fillRect(cx0 - ex * 0.15, sy + shh * 0.12, cw + ex * 0.3, shh * 0.76 + ex);          // корпус кассеты
-      g.fillStyle = lc([70, 70, 76]); g.fillRect(cx0 - ex * 0.15, sy + shh * 0.12, cw + ex * 0.3, Math.max(0.6, ex * 0.35)); // верхняя грань
-      g.fillStyle = lc([236, 230, 206]); g.fillRect(cx0 + cw * 0.18, sy + shh * 0.3 + ex * 0.4, cw * 0.64, shh * 0.34);    // наклейка
-      g.fillStyle = lc([60, 50, 160]); g.font = `${shh * 0.26}px "Neucha", sans-serif`; g.textAlign = 'center'; g.textBaseline = 'middle';
-      g.fillText('ЭФИР-95', cx0 + cw / 2, sy + shh * 0.47 + ex * 0.4);
-      g.restore();
-    }
-  },
-  label() { return this.loaded ? 'Видеомагнитофон: идёт кассета. Щёлкните — достать' : 'Видеомагнитофон. Щёлкните — вставить кассету'; },
-  async click() {
-    await Sound.start();
-    if (this.busy) return; this.busy = true;
-    const mech = (t, f, d, v) => Sound.burst(t, { dur: d, vol: v, type: 'bandpass', f, q: 1.5, dest: Sound.sfx, pan: -0.05 });
-    if (!this.loaded) {
-      // вставляем: кассета торчит из щели → её затягивает, щелчок, мотор; табло LOAD → ▶
-      this.mode = 'load'; this.cas = 1; this.p = 1; this.draw();
-      if (Sound.started) { const t = Sound.ctx.currentTime; mech(t + 0.05, 900, 0.06, 0.3); mech(t + 0.3, 300, 0.8, 0.08); mech(t + 1.15, 1400, 0.05, 0.22); }
-      await this.tween('p', 1, 0, 1000);
-      await wait(700);
-      this.loaded = true; this.mode = 'play'; this.cas = 0; this.t0 = nowMs(); this.counter = Math.floor(rand(60, 2400)); this.draw();   // шторка щели закрылась
-      const vi = CFG.channels.findIndex(c => c.type === 'vcr');
-      if (!TV.on) { TV.powerOn(); if (vi >= 0) setTimeout(() => TV.setChannel(vi), CFG.tv.powerOnMs + 200); }
-      else if (vi >= 0) { if (TV.ch !== vi) TV.setChannel(vi); else { TV.activateVideo(false); TV.activateVideo(true); } }
-    } else {
-      this.mode = 'eject'; this.loaded = false; this.cas = 1; this.p = 0; this.draw();
-      if (Sound.started) { const t = Sound.ctx.currentTime; mech(t, 300, 0.6, 0.08); mech(t + 0.7, 1100, 0.06, 0.25); }
-      if (TV.channel().type === 'vcr') { TV.activateVideo(false); TV.activateVideo(true); }
-      await this.tween('p', 0, 1, 800);
-      await wait(1100);
-      await this.tween('cas', 1, 0, 400);                    // кассету забрали
-      this.mode = 'clock'; this.p = 0; this.draw();
-    }
-    this.busy = false;
-    Zones.refreshLabels();
-  },
-  tween(key, a, b, ms) {
-    return new Promise(res => {
-      const t0 = nowMs(); this.anim = true;
-      const st = () => { const k = clamp((nowMs() - t0) / ms, 0, 1), e = k * k * (3 - 2 * k); this[key] = lerp(a, b, e); this.draw(); if (k < 1) requestAnimationFrame(st); else { this.anim = false; res(); } };
-      requestAnimationFrame(st);
-    });
-  },
-};
-const lerp2 = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
-
-/* ==========================================================================
-   7f. ПАЧКА ДРАЖЕ (вместо размытой упаковки на полке)
-   Своя, придуманная упаковка 90-х: фольгированный пакетик с гребешками швов,
-   надпись «ДРАЖЕ», рассыпь цветных конфет, звёздочка «НОВИНКА!». Рисуется кодом
-   в нужном свете каждой сцены — и в картинку комнаты, и как вырезка для анимации.
-   ========================================================================== */
-const Pack = {
-  LIGHT: {    // во сколько раз (линейно) свет на полке по сценам
-    day: [0.5, 0.48, 0.44], sunset: [0.5, 0.35, 0.25], evening: [0.4, 0.29, 0.19], overcast: [0.2, 0.22, 0.24],
-    storm: [0.16, 0.175, 0.2], night: [0.012, 0.014, 0.022],
-  },
-  urls: {},
-  /* рисуем в коробке вырезки 71×104 (пиксели картинки), k — масштаб */
-  draw(g, k, E, glossDir = 0.6) {
-    const c = (rgb, m = 1) => `rgb(${rgb.map((v, i) => clamp(Math.round(255 * Math.pow(Math.pow(v / 255, 2.2) * E[i] * m, 1 / 2.2)), 0, 255)).join(',')})`;
-    g.save(); g.scale(k, k);
-    const x = 13, y = 13, w = 46, h = 79;
-    // форма: пухлый пакет — бока чуть выгнуты, сверху и снизу зубчатые швы
-    const body = () => {
-      g.beginPath();
-      g.moveTo(x + 1, y + 6);
-      g.quadraticCurveTo(x - 1.5, y + h / 2, x + 1, y + h - 6);
-      g.lineTo(x + w - 1, y + h - 6);
-      g.quadraticCurveTo(x + w + 1.5, y + h / 2, x + w - 1, y + 6);
-      g.closePath();
-    };
-    // тень на стенку витрины
-    g.save(); g.shadowColor = 'rgba(0,0,0,.45)'; g.shadowBlur = 4 * k; g.shadowOffsetX = -2 * k; g.shadowOffsetY = 1 * k;
-    g.fillStyle = '#000'; body(); g.fill(); g.restore();
-    // фон — фиолетово-синий градиент
-    g.save(); body(); g.clip();
-    const bg = g.createLinearGradient(x, y, x + w * 0.4, y + h);
-    bg.addColorStop(0, c([120, 40, 150])); bg.addColorStop(0.55, c([40, 50, 170])); bg.addColorStop(1, c([20, 30, 110]));
-    g.fillStyle = bg; g.fillRect(x - 3, y, w + 6, h);
-    // лучи-«взрыв» за надписью
-    g.globalAlpha = 0.18; g.fillStyle = c([255, 230, 120]);
-    for (let i = 0; i < 12; i++) { const a = i / 12 * Math.PI * 2; g.beginPath(); g.moveTo(x + w / 2, y + 30); g.lineTo(x + w / 2 + Math.cos(a) * 40, y + 30 + Math.sin(a) * 40); g.lineTo(x + w / 2 + Math.cos(a + 0.18) * 40, y + 30 + Math.sin(a + 0.18) * 40); g.closePath(); g.fill(); }
-    g.globalAlpha = 1;
-    // надпись
-    g.save(); g.translate(x + w / 2, y + 25); g.rotate(-0.12);
-    g.font = `900 12.5px "Arial Black", "Arial", sans-serif`; g.textAlign = 'center'; g.textBaseline = 'middle';
-    g.lineJoin = 'round'; g.lineWidth = 3.2; g.strokeStyle = c([150, 20, 30]); g.strokeText('ДРАЖЕ', 0, 0);
-    const tg = g.createLinearGradient(0, -6, 0, 6); tg.addColorStop(0, c([255, 245, 140], 1.1)); tg.addColorStop(1, c([255, 170, 30]));
-    g.fillStyle = tg; g.fillText('ДРАЖЕ', 0, 0);
-    g.font = `bold 4.6px "Arial Narrow", Arial, sans-serif`; g.fillStyle = c([255, 255, 255]); g.fillText('фруктовое ассорти', 0, 9);
-    g.restore();
-    // рассыпь драже: блестящие «линзочки»
-    const cols = [[230, 40, 40], [250, 200, 30], [60, 170, 60], [240, 120, 20], [150, 60, 200], [240, 240, 240]];
-    let seed = 7; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
-    for (let i = 0; i < 16; i++) {
-      const cx = x + 6 + rnd() * (w - 12), cy = y + 44 + rnd() * 26, r = 3 + rnd() * 1.6, a = rnd() * Math.PI;
-      g.save(); g.translate(cx, cy); g.rotate(a);
-      g.fillStyle = c(cols[i % cols.length]); g.beginPath(); g.ellipse(0, 0, r, r * 0.72, 0, 0, Math.PI * 2); g.fill();
-      g.fillStyle = c([255, 255, 255], 1.2); g.globalAlpha = 0.7; g.beginPath(); g.ellipse(-r * 0.3, -r * 0.25, r * 0.35, r * 0.18, -0.4, 0, Math.PI * 2); g.fill();
-      g.restore();
-    }
-    // долька апельсина и вишенка
-    g.fillStyle = c([250, 150, 30]); g.beginPath(); g.arc(x + w - 9, y + 66, 6, Math.PI, 0); g.fill();
-    g.strokeStyle = c([255, 230, 170]); g.lineWidth = 0.6; for (let i = 1; i < 6; i++) { const a = Math.PI + i * Math.PI / 6; g.beginPath(); g.moveTo(x + w - 9, y + 66); g.lineTo(x + w - 9 + Math.cos(a) * 5.2, y + 66 + Math.sin(a) * 5.2); g.stroke(); }
-    g.fillStyle = c([190, 20, 40]); g.beginPath(); g.arc(x + 9, y + 72, 3.2, 0, Math.PI * 2); g.arc(x + 14, y + 73.5, 3, 0, Math.PI * 2); g.fill();
-    g.strokeStyle = c([60, 120, 40]); g.lineWidth = 0.7; g.beginPath(); g.moveTo(x + 9, y + 69); g.quadraticCurveTo(x + 12, y + 63, x + 15, y + 65); g.moveTo(x + 14, y + 70.5); g.lineTo(x + 15, y + 65); g.stroke();
-    // звёздочка «НОВИНКА!»
-    g.save(); g.translate(x + w - 9, y + 11); g.rotate(0.3);
-    g.fillStyle = c([240, 30, 40]); g.beginPath();
-    for (let i = 0; i < 16; i++) { const r = i % 2 ? 4.2 : 7, a = i / 16 * Math.PI * 2; g.lineTo(Math.cos(a) * r, Math.sin(a) * r); } g.closePath(); g.fill();
-    g.fillStyle = c([255, 255, 255]); g.font = `bold 2.6px Arial, sans-serif`; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText('НОВИНКА!', 0, 0.2);
-    g.restore();
-    g.fillStyle = c([230, 230, 240]); g.font = `bold 3.4px Arial, sans-serif`; g.textAlign = 'left'; g.fillText('40 г', x + 4, y + h - 9.5);
-    // фольга: блики и складки
-    const gl = g.createLinearGradient(x, 0, x + w, 0);
-    const a0 = glossDir > 0 ? 0.62 : 0.2;
-    gl.addColorStop(0, 'rgba(255,255,255,0)'); gl.addColorStop(a0 - 0.1, 'rgba(255,255,255,0)'); gl.addColorStop(a0, `rgba(255,255,255,${0.32 * Math.min(1, E[1] * 2)})`); gl.addColorStop(a0 + 0.08, 'rgba(255,255,255,0)'); gl.addColorStop(1, 'rgba(255,255,255,0)');
-    g.fillStyle = gl; g.fillRect(x - 3, y, w + 6, h);
-    const sh = g.createLinearGradient(x, 0, x + w, 0); sh.addColorStop(0, 'rgba(0,0,0,.35)'); sh.addColorStop(0.15, 'rgba(0,0,0,0)'); sh.addColorStop(0.85, 'rgba(0,0,0,0)'); sh.addColorStop(1, 'rgba(0,0,0,.4)');
-    g.fillStyle = sh; g.fillRect(x - 3, y, w + 6, h);
-    g.restore();
-    // зубчатые швы сверху и снизу (серебристая фольга)
-    for (const [sy, dir] of [[y, 1], [y + h - 7, -1]]) {
-      g.fillStyle = c([200, 200, 210], 0.95);
-      g.beginPath(); g.moveTo(x + 0.5, sy + (dir > 0 ? 7 : 0));
-      for (let i = 0; i <= 18; i++) g.lineTo(x + 0.5 + i * (w - 1) / 18, sy + (dir > 0 ? (i % 2 ? 0 : 1.6) : (i % 2 ? 7 : 5.4)));
-      g.lineTo(x + w - 0.5, sy + (dir > 0 ? 7 : 0)); g.closePath(); g.fill();
-      g.strokeStyle = c([150, 150, 160]); g.lineWidth = 0.3;
-      for (let i = 1; i < 18; i++) { const xx = x + 0.5 + i * (w - 1) / 18; g.beginPath(); g.moveTo(xx, sy + 1.6); g.lineTo(xx, sy + 5.4); g.stroke(); }
-    }
-    g.restore();
-  },
-  /* вырезка для анимации (×3 для чёткости) */
-  spriteURL(scene) {
-    if (this.urls[scene]) return this.urls[scene];
-    const k = 3, cv = document.createElement('canvas'); cv.width = 71 * k; cv.height = 104 * k;
-    this.draw(cv.getContext('2d'), k, this.LIGHT[scene] || this.LIGHT.day, scene === 'evening' ? -1 : 0.6);
-    return (this.urls[scene] = cv.toDataURL('image/png'));
-  },
-  /* в картинку сцены: сначала «чистая подложка» поверх старой пачки, потом новая пачка */
-  compose(g, plate, scene, sunK) {
-    const [bx, by] = [936, 414];
-    if (plate && plate.complete && plate.naturalWidth) g.drawImage(plate, bx, by, 71, 104);
-    g.save(); g.translate(bx, by);
-    const E = (this.LIGHT[scene] || this.LIGHT.day).map(v => v * (sunK || 1));
-    this.draw(g, 1, E, scene === 'evening' ? -1 : 0.6);
-    g.restore();
-  },
-};
-
 /* ---------- микро-эффекты ---------- */
 const FX = {
   wrap: $('#fx'),
@@ -4576,9 +3985,8 @@ const UI = {
     const intro = $('#intro'); intro.textContent = T.intro;
     setTimeout(() => intro.classList.add('show'), 700);
     $('#powerHint .bubble').textContent = T.powerHint;
-    const tv = $('#mxTv'), room = $('#mxRoom'), radio = $('#mxRadio');
+    const tv = $('#mxTv'), room = $('#mxRoom');
     tv.value = state.tvVolume; room.value = state.ambience;
-    if (radio) { radio.value = state.radioVolume; radio.addEventListener('input', () => { Sound.start(); Radio.setVolume(+radio.value); }); }
     const ph = $('#phonesBtn');
     if (ph) {
       const sync = () => { ph.setAttribute('aria-pressed', String(state.headphones)); ph.classList.toggle('on', state.headphones); ph.title = state.headphones ? T.phonesOn : T.phonesOff; };
@@ -4748,15 +4156,13 @@ function init() {
       .catch(err => { console.warn('[Tube TV] WebGL-комната недоступна, работают картинки:', err.message); idle(() => BG.preloadAll(), 2500); });
   } catch (err) { console.warn('[Tube TV] WebGL-комната:', err.message); idle(() => BG.preloadAll(), 2500); }
   TV.init();
-  Embed.init();
+  Feed.init();
   Light.init();
   Dust.init();
   Weather.init();
   Zones.init();
   Puppets.init();
-  Radio.init();
-  Props.init();
-  VCR.init();
+  Deer.init();
   UI.init();
   applyScene(true);
   layout();
@@ -4767,10 +4173,10 @@ function init() {
 
   // Клик по экрану, когда браузер не дал видео запуститься самому
   stageEl.addEventListener('click', e => {
-    if (Embed.status !== 'tap' || state.calibrating) return;
+    if (!Feed.autoMuted || state.calibrating) return;
     const r = stageEl.getBoundingClientRect(), z = CFG.zones.screen;
     const x = (e.clientX - r.left) / r.width * 100, y = (e.clientY - r.top) / r.height * 100;
-    if (x > z.x && x < z.x + z.w && y > z.y && y < z.y + z.h) Embed.tap();
+    if (x > z.x && x < z.x + z.w && y > z.y && y < z.y + z.h) Feed.tap();
   });
 
   // Двойной клик по экрану — сесть / встать
@@ -4782,7 +4188,7 @@ function init() {
   });
 
   // Первый жест пользователя будит звук (ограничения автозапуска в браузерах)
-  addEventListener('pointerdown', () => Sound.start(), { once: true, capture: true });
+  addEventListener('pointerdown', () => { Feed.bless(); Sound.start(); }, { once: true, capture: true });
 
   addEventListener('keydown', e => {
     if (e.target.closest && e.target.closest('textarea, input')) return;
@@ -4817,21 +4223,17 @@ function init() {
     Wind.update(t, dt);
     if (BG.gl) {
       GLRoom.render(t);
-      const busy = GLRoom.busy();
-      if (busy !== BG._busy && BG.hiresWrap) { BG._busy = busy; BG.hiresWrap.classList.toggle('busy', busy); }
     }
     TV.render(t);
+    Zones.paintKnobs(t);
     Light.update(t);
     Dust.update(t, dt);
     Weather.update(t, dt);
-    Radio.update(t);
-    Props.update(t);
-    VCR.update(t);
     requestAnimationFrame(frame);
   };
   requestAnimationFrame(frame);
 
-  window.TubeTV = { GLRoom, BG, TV, Sound, Events, setMode, setWeather, Calib, Puppets, Camera, Embed, Wind, Weather, Radio, Props, VCR, state, CFG };   // для отладки из консоли
+  window.TubeTV = { GLRoom, BG, TV, Sound, Events, setMode, setWeather, Calib, Puppets, Camera, Feed, Deer, Wind, Weather, state, CFG };   // для отладки из консоли
 }
 
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Tube TV</title>
-  <!-- v0.8 -->
+  <!-- v0.9 -->
   <meta name="description" content="Комната середины 90-х: ламповый телевизор, июньский закат, радиоточка и тюль на ветру. Включите телевизор и посидите немного.">
   <meta property="og:type" content="website">
   <meta property="og:title" content="Tube TV — комната девяностых">
@@ -45,7 +45,7 @@
       <!-- 2. Экран телевизора: встроенный плеер (под стеклом) + WebGL-кинескоп поверх -->
       <div id="tvEmbed" class="tv-embed" aria-hidden="true">
         <b class="cover"></b>
-        <i class="crt-scan"></i><i class="crt-mask"></i><i class="crt-vig"></i><i class="crt-glass"></i><i class="crt-flicker"></i><i class="vhs-track"></i><i class="vhs-osd">▶ PLAY</i>
+        <i class="crt-scan"></i><i class="crt-mask"></i><i class="crt-vig"></i><i class="crt-glass"></i><i class="crt-flicker"></i>
       </div>
       <div id="tvScreen" class="tv-screen"><canvas id="tvCanvas"></canvas></div>
 
@@ -84,8 +84,8 @@
       <div class="mixer" role="group" aria-label="Громкость">
         <label class="mx"><span>ТВ</span><input id="mxTv" type="range" min="0" max="1" step="0.01" aria-label="Громкость телевизора"></label>
         <label class="mx"><span>Комната</span><input id="mxRoom" type="range" min="0" max="1" step="0.01" aria-label="Громкость комнаты: улица, кухня, погода"></label>
-        <label class="mx"><span>Радио</span><input id="mxRadio" type="range" min="0" max="1" step="0.01" aria-label="Громкость радиоточки"></label>
       </div>
+      <button id="rtxBtn" class="phones rtx" type="button" aria-pressed="true" aria-label="RTX: блики и преломления в хрустале" title="RTX — блики и преломления в хрустале">RTX</button>
       <button id="phonesBtn" class="phones" type="button" aria-pressed="true" aria-label="Объёмный звук для наушников">
         <svg viewBox="0 0 24 24" width="21" height="21" aria-hidden="true"><path d="M4 15v-3a8 8 0 0 1 16 0v3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><rect x="3" y="14" width="4.5" height="6.5" rx="1.6" fill="currentColor"/><rect x="16.5" y="14" width="4.5" height="6.5" rx="1.6" fill="currentColor"/></svg>
       </button>
@@ -111,7 +111,6 @@
       <div class="cp-row cp-events">
         <button type="button" data-ev="siren">Сирена</button>
         <button type="button" data-ev="frying">Яичница</button>
-        <button type="button" data-ev="clock">Часы</button>
         <button type="button" data-ev="door">Дверь</button>
         <button type="button" data-ev="dog">Собака</button>
       </div>

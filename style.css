@@ -62,6 +62,7 @@ html, body {
 .room-gl.on { opacity: 1; }
 #bg.gl .bg-layer { visibility: hidden; }
 .hires-wrap { position: absolute; inset: 0; pointer-events: none; }
+.hires-wrap img.hires { clip-path: inset(0 19.6% 0 0); }   /* справа — витрина с пачкой драже: её рисует сама сцена */
 .hires-wrap img.hires {
   position: absolute; display: block;
   inset: auto; opacity: 0; transition: opacity .8s ease;
@@ -219,6 +220,7 @@ body.evening .hot.evening-only { pointer-events: auto; }
 .puppet .plate, .puppet .body, .puppet .tt { position: absolute; inset: 0; width: 100%; height: 100%; }
 .puppet .plate { opacity: 0; display: block; }
 .puppet.anim .plate { opacity: 1; }
+.puppet.gl-hole .plate { opacity: 0 !important; }   /* под предметом рисует сама сцена */
 .puppet .body { transform-style: preserve-3d; will-change: transform; }
 .puppet .body img { position: absolute; inset: 0; width: 100%; height: 100%; display: block; -webkit-user-drag: none; }
 .puppet .sprite { opacity: 0; }
@@ -320,6 +322,7 @@ body.evening .hot.evening-only { pointer-events: auto; }
 /* ---------- эффекты пасхалок ---------- */
 .fx { position: absolute; inset: 0; pointer-events: none; }
 .fx > * { position: absolute; will-change: transform, opacity; }
+.fx .candy-fx { width: calc(var(--u) * 4.4); height: calc(var(--u) * 3.2); border-radius: 50%; margin: calc(var(--u) * -1.6) 0 0 calc(var(--u) * -2.2); box-shadow: 0 1px 2px rgba(0,0,0,.35); }
 .fx .bubble-fx {
   width: calc(var(--u) * 5); height: calc(var(--u) * 5); border-radius: 50%;
   border: max(1px, calc(var(--u) * 1)) solid rgba(255, 245, 225, .85);
@@ -554,3 +557,19 @@ body.evening .radio-pt.on .radio-glow, body.weather-downpour .radio-pt.on .radio
 }
 .tv-embed.vhs.revealed .vhs-osd { animation: vhsOsd 4s ease-out 1; }
 @keyframes vhsOsd { 0%, 70% { opacity: .9; } 100% { opacity: 0; } }
+
+/* ---------- заставка при загрузке: кинескоп «прогревается», потом включается полосой ---------- */
+.boot { position: fixed; inset: 0; z-index: 100; background: #050403; display: grid; place-items: center; transition: opacity .7s ease .35s; }
+.boot-in { display: grid; gap: 18px; justify-items: center; color: #e9d9bf; opacity: .9; }
+.boot-logo { font: 26px/1 "Press Start 2P", ui-monospace, monospace; letter-spacing: 4px; text-shadow: 0 0 12px rgba(255, 190, 110, .55), 0 0 2px #fff; animation: bootGlow 2.4s ease-in-out infinite; }
+.boot-txt { font: 15px/1 "Neucha", system-ui, sans-serif; color: rgba(233, 217, 191, .7); letter-spacing: 1px; }
+.boot-dots b { font-weight: normal; animation: bootDot 1.2s infinite; opacity: .2; }
+.boot-dots b:nth-child(2) { animation-delay: .2s; } .boot-dots b:nth-child(3) { animation-delay: .4s; }
+@keyframes bootDot { 40% { opacity: 1; } }
+@keyframes bootGlow { 50% { opacity: .75; text-shadow: 0 0 20px rgba(255, 190, 110, .8), 0 0 2px #fff; } }
+.boot-line { position: absolute; left: 0; right: 0; top: 50%; height: 2px; margin-top: -1px; background: #fff8ec; box-shadow: 0 0 18px 6px rgba(255, 240, 210, .7); transform: scaleX(0); opacity: 0; }
+.boot.done .boot-in { opacity: 0; transition: opacity .2s; }
+.boot.done .boot-line { animation: bootLine .55s cubic-bezier(.6, 0, .3, 1) forwards; }
+.boot.done { opacity: 0; pointer-events: none; }
+@keyframes bootLine { 0% { transform: scaleX(0); opacity: 1; } 45% { transform: scaleX(1) scaleY(1); opacity: 1; } 100% { transform: scaleX(1) scaleY(400); opacity: 0; } }
+body.reduced .boot.done .boot-line { animation: none; }

@@ -146,6 +146,11 @@ const idle = (fn, delay = 0) => {
   const go = () => setTimeout(() => (window.requestIdleCallback ? requestIdleCallback(fn, { timeout: 4000 }) : fn()), delay);
   if (document.readyState === 'complete') go(); else addEventListener('load', go, { once: true });
 };
+/* заставка: убираем, как только комната готова (или через 7 с в любом случае) */
+const Boot = {
+  done() { if (this._d) return; this._d = true; const b = $('#boot'); if (!b) return; b.classList.add('done'); setTimeout(() => b.remove(), 1500); },
+};
+setTimeout(() => Boot.done(), 7000);
 const GLRoom = {
   ok: false, dirty: true,
   cur: { w: [1, 0, 0, 0], n: 0, s: 0, k: 1 }, tw: {},
@@ -232,7 +237,13 @@ uniform float uTime, uGust;
 uniform vec3 uSunD;
 `;
     const DBG = /[?&]dbg=light/.test(location.search) ? '#define DBG_LIGHT\n' : '';
-    const FS = HEAD + DBG + `
+    this.holeOK = gl.getParameter(gl.MAX_TEXTURE_IMAGE_UNITS) >= 9;     // 9-я текстура: комната без пасхалок
+    const HOLE = this.holeOK ? '#define HOLE\n' : '';
+    const FS = HEAD + DBG + HOLE + `
+#ifdef HOLE
+uniform sampler2D uDayP;    // день без пасхалок — под предметом, пока он «в руках»
+uniform vec4 uHole;         // прямоугольник предмета (px), z<0 — выключено
+#endif
 uniform sampler2D uDay, uEve, uOver, uStorm, uSun, uGeo, uLace, uShaft;
 uniform vec4 uW;            // веса сцен: день (с солнцем), вечер, морось, ливень
 uniform float uNight;       // ночь
@@ -315,7 +326,11 @@ void main(){
       Lnew = mix(Lold, Lp, uPhys);
     }
     vec3 ratio = mix((uAmb + Lnew * uSunC) / (1.0 + Lold), uWinC, winM);
-    vec3 c = lin(texture2D(uDay, uq).rgb) * ratio;
+    vec3 dayc = texture2D(uDay, uq).rgb;
+#ifdef HOLE
+    if (uHole.z > 0.0 && q.x > uHole.x && q.y > uHole.y && q.x < uHole.x + uHole.z && q.y < uHole.y + uHole.w) dayc = texture2D(uDayP, uq).rgb;
+#endif
+    vec3 c = lin(dayc) * ratio;
     if (uShaftK > 0.001) c += texture2D(uShaft, v).r * uShaftK * uSunC * vec3(1.0, 0.8, 0.55) * (1.0 - winM * 0.7);
     // мягкое «плечо» вместо жёсткого обреза: в ярком оранжевом пятне красный не упирается в потолок,
     // и рисунок кружева остаётся виден
@@ -394,7 +409,7 @@ void main(){
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
     gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
     const U = (prog, names) => { const o = {}; for (const n of names) o[n] = gl.getUniformLocation(prog, n); return o; };
-    this.u = U(this.prog, ['uDay', 'uEve', 'uOver', 'uStorm', 'uSun', 'uGeo', 'uLace', 'uShaft', 'uW', 'uNight', 'uImg', 'uWin', 'uAmb', 'uSunC', 'uWinC', 'uLamp',
+    this.u = U(this.prog, ['uDayP', 'uHole', 'uDay', 'uEve', 'uOver', 'uStorm', 'uSun', 'uGeo', 'uLace', 'uShaft', 'uW', 'uNight', 'uImg', 'uWin', 'uAmb', 'uSunC', 'uWinC', 'uLamp',
       'uPhys', 'uSunK', 'uShaftK', 'uSunD', 'uGust', 'uAmp', 'uBillow', 'uPhase', 'uTime', 'uRain', 'uSlant']);
     this.uS = U(this.progS, ['uGeo', 'uImg', 'uTime', 'uSunD', 'uGust']);
     gl.useProgram(this.progS); gl.uniform2f(this.uS.uImg, IMG_W, IMG_H); gl.uniform1i(this.uS.uGeo, 5);
@@ -424,6 +439,12 @@ void main(){
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.shaftTex, 0);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.uniform1i(this.u.uShaft, 7);
+    if (this.holeOK) {
+      gl.activeTexture(gl.TEXTURE8); this.texP = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, this.texP);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 255]));
+      for (const [p, val] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, p, val);
+      gl.uniform1i(this.u.uDayP, 8); gl.uniform4f(this.u.uHole, 0, 0, -1, 0);
+    }
     return this.need(state.scene).then(() => { this.ok = true; this.resize(); this.dirty = true; return true; });
   },
   lost() {
@@ -449,10 +470,13 @@ void main(){
           if (scene) {                                  // видеомагнитофон дорисовывается в саму сцену
             try {
               if (k === 'uDay') { await this.loadUnit('uSun').catch(() => {}); }
-              src = VCR.compose(im, k, this.imgs.uSun);
+              const sc = { uDay: 'day', uEve: 'evening', uOver: 'overcast', uStorm: 'storm' }[k];
+              const plate = await new Promise(r => { const pl = new Image(); pl.onload = () => r(pl); pl.onerror = () => r(null); pl.src = `assets/eggs/sachet-plate-${sc}.png`; });
+              src = VCR.compose(im, k, this.imgs.uSun, plate);
             } catch (e) { console.warn('[Tube TV] видик:', e); src = im; }
           }
           this.imgs[k] = im;
+          if (k === 'uDay' && this.holeOK) this.buildPlates(src);
           gl.activeTexture(gl.TEXTURE0 + i); gl.bindTexture(gl.TEXTURE_2D, this.tex[k]);
           gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
           gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src);
@@ -466,11 +490,49 @@ void main(){
     }));
   },
   need(scene) { return Promise.all(this.unitsFor(scene).map(k => this.loadUnit(k))); },
+  /* «день без пасхалок»: на закате, пока предмет в руках, под ним рисуется живой свет, а не застывшая подложка */
+  buildPlates(dayCanvas) {
+    const cv = document.createElement('canvas'); cv.width = dayCanvas.width || IMG_W; cv.height = dayCanvas.height || IMG_H;
+    const g = cv.getContext('2d'); g.drawImage(dayCanvas, 0, 0, cv.width, cv.height);
+    const sx = cv.width / IMG_W, sy = cv.height / IMG_H;
+    const eggs = CFG.eggs.filter(e => e.sprite);
+    let left = eggs.length;
+    const upload = () => {
+      const gl = this.gl; gl.activeTexture(gl.TEXTURE8); gl.bindTexture(gl.TEXTURE_2D, this.texP);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, cv);
+      this.platesReady = true;
+    };
+    for (const e of eggs) {
+      const im = new Image();
+      im.onload = im.onerror = () => {
+        if (im.naturalWidth) g.drawImage(im, e.sprite[0] * sx, e.sprite[1] * sy, e.sprite[2] * sx, e.sprite[3] * sy);
+        if (--left === 0) upload();
+      };
+      im.src = Puppets.src(e.id, 'day', true);
+    }
+  },
+  /* предмет «взяли в руки»: GL рисует под ним комнату без него; возвращает вырезку предмета в текущем свете */
+  hole(box) {
+    if (!this.holeOK || !this.platesReady || !this.ok) return null;
+    const gl = this.gl;
+    gl.useProgram(this.prog);
+    if (!box) { gl.uniform4f(this.u.uHole, 0, 0, -1, 0); this.dirty = true; return null; }
+    gl.uniform4f(this.u.uHole, box[0], box[1], box[2], box[3]); this.dirty = true;
+    return true;
+  },
+  /* кусок текущего кадра комнаты (для вырезки предмета в живом свете) */
+  grab(box) {
+    if (!this.ok || !this.c) return null;
+    const k = this.c.width / IMG_W, [x, y, w, h] = box;
+    const cv = document.createElement('canvas'); cv.width = Math.round(w * k); cv.height = Math.round(h * k);
+    try { cv.getContext('2d').drawImage(this.c, x * k, y * k, w * k, h * k, 0, 0, cv.width, cv.height); return cv; } catch (_) { return null; }
+  },
   preloadAll() { return Promise.all(this.units.map(k => this.loadUnit(k).catch(() => {}))); },
 
   resize() {
     if (!this.c) return;
-    const st = state.stage, dpr = Math.min(devicePixelRatio || 1, 2);
+    const st = state.stage, dpr = Math.min(devicePixelRatio || 1, HOVER ? 2 : 1.5);   // на телефонах — чуть легче
     const w = Math.max(2, Math.round(Math.min(st.w * dpr, IMG_W * 1.25))), h = Math.round(w * IMG_H / IMG_W);
     if (this.c.width !== w || this.c.height !== h) { this.c.width = w; this.c.height = h; this.dirty = true; }
     const sw = Math.max(2, Math.round(w / 4)), shh = Math.max(2, Math.round(h / 4));
@@ -647,7 +709,7 @@ const BG = {
     bg.insertBefore(GLRoom.c, this.hiresWrap || null);
     for (const l of Object.values(this.layers)) { const s = l.querySelector('svg.sway'); if (s) s.remove(); }
     GLRoom.go(state.scene, true);
-    requestAnimationFrame(() => { GLRoom.c.classList.add('on'); setTimeout(() => bg.classList.add('gl'), 700); });
+    requestAnimationFrame(() => { GLRoom.c.classList.add('on'); setTimeout(() => bg.classList.add('gl'), 700); requestAnimationFrame(() => Boot.done()); });
   },
   video(src, poster) {
     const v = document.createElement('video');
@@ -682,7 +744,7 @@ const BG = {
     const b = this.bds[scene];
     if (b && b.dataset.src) { b.style.backgroundImage = `url("${b.dataset.src}")`; delete b.dataset.src; }
     const img = !this.gl && this.layers[scene] && this.layers[scene].querySelector('img');
-    if (img && img.dataset.src) { img.src = img.dataset.src; delete img.dataset.src; }
+    if (img && img.dataset.src) { img.src = img.dataset.src; delete img.dataset.src; img.addEventListener('load', () => { if (!GLRoom.ok) setTimeout(() => !GLRoom.ok && Boot.done(), 1200); }, { once: true }); }
     const si = !this.gl && this.layers[scene] && this.layers[scene].querySelector('svg.sway image[data-href]');
     if (si) { si.setAttribute('href', si.dataset.href); si.setAttributeNS('http://www.w3.org/1999/xlink', 'xlink:href', si.dataset.href); si.removeAttribute('data-href'); }
   },
@@ -3052,7 +3114,7 @@ const Puppets = {
     this.mode = mode;
     if (!this.live) return;
     for (const p of Object.values(this.items)) {
-      const id = p.egg.id, cut = this.src(id, mode);
+      const id = p.egg.id, cut = id === 'sachet' ? Pack.spriteURL(mode) : this.src(id, mode);
       p.el.querySelector('.plate').src = this.src(id, mode, true);
       p.sprite.src = cut;
       if (p.sides) for (const s of p.sides) s.src = cut;
@@ -3107,12 +3169,31 @@ const Puppets = {
     if (!p || p.busy) return;
     p.busy = true;
     await this.ensure(p);
+    // на закате свет живой (солнце садится, тюль колышет пятна): вырезку берём из текущего кадра,
+    // а под предметом WebGL рисует комнату без него — никаких застывших прямоугольников
+    let live = false;
+    if (BG.gl && state.scene === 'sunset' && GLRoom.holeOK && GLRoom.platesReady) {
+      const fr = GLRoom.grab(p.box), mask = p.alpha || (p.alpha = await this.maskOf(p));
+      if (fr && mask) {
+        const g = fr.getContext('2d'); g.globalCompositeOperation = 'destination-in'; g.drawImage(mask, 0, 0, fr.width, fr.height);
+        const url = fr.toDataURL();
+        p.sprite.src = url; if (p.sides) for (const sd of p.sides) sd.src = url;
+        await new Promise(r => p.sprite.complete ? r() : (p.sprite.onload = r));
+        if (p.tt) p.tt.dirty = true;
+        GLRoom.hole(p.box); live = true; p.el.classList.add('gl-hole');
+      }
+    }
     p.el.classList.add('anim');
     try { await (this.anims[p.egg.anim] || this.anims.rattle3d).call(this, p); }
     catch (err) { console.warn('[Tube TV] анимация', id, err); }
     p.body.style.transform = '';
     p.el.classList.remove('anim', 'no-sprite');
+    if (live) { GLRoom.hole(null); p.el.classList.remove('gl-hole'); this.setMode(this.mode); }
     p.busy = false;
+  },
+  /* маска предмета — альфа дневной вырезки */
+  maskOf(p) {
+    return new Promise(r => { const im = new Image(); im.onload = () => r(im); im.onerror = () => r(null); im.src = p.egg.id === 'sachet' ? Pack.spriteURL('day') : this.src(p.egg.id, 'day'); });
   },
 
   sheen(p, dur, delay = 0) {
@@ -4152,31 +4233,36 @@ const VCR = {
     // ножки
     g.fillStyle = c([20, 20, 22]); g.fillRect(x + w * 0.05, y + h - 1.2, w * 0.1, 1.2); g.fillRect(x + w * 0.85, y + h - 1.2, w * 0.1, 1.2);
   },
-  /* дорисовать корпус в картинку сцены; для дня — с учётом «старого солнца» (его потом снимет расчёт) */
-  compose(img, unit, sunImg) {
-    const E = (CFG.vcr.light[{ uDay: 'day', uEve: 'evening', uOver: 'overcast', uStorm: 'storm' }[unit]] || [0.4, 0.4, 0.4]);
+  /* Дорисовать видик и пачку драже в картинку сцены. Для дня — с учётом «старого солнца»:
+     там, где на фото лежало пятно, предмет тоже в пятне (×(1+Lold)); потом расчёт это пятно снимет. */
+  compose(img, unit, sunImg, plate) {
+    const scene = { uDay: 'day', uEve: 'evening', uOver: 'overcast', uStorm: 'storm' }[unit];
+    const E = CFG.vcr.light[scene] || [0.4, 0.4, 0.4];
     const cv = document.createElement('canvas'); cv.width = img.naturalWidth || IMG_W; cv.height = img.naturalHeight || IMG_H;
     const g = cv.getContext('2d'); g.drawImage(img, 0, 0, cv.width, cv.height);
     g.save(); g.scale(cv.width / IMG_W, cv.height / IMG_H);
+    if (plate && plate.complete && plate.naturalWidth) g.drawImage(plate, 936, 414, 71, 104);   // старой пачки больше нет
+    const layer = document.createElement('canvas'); layer.width = IMG_W; layer.height = IMG_H;
+    const lg = layer.getContext('2d', { willReadFrequently: true });
+    this.paint(lg, E);
+    lg.save(); lg.translate(936, 414); lg.globalAlpha = 0.9; Pack.draw(lg, 1, Pack.LIGHT[scene] || Pack.LIGHT.day, scene === 'evening' ? -1 : 0.6); lg.restore();   // за стеклом витрины — отражения чуть проступают
     if (unit === 'uDay' && sunImg) {
-      // где на фото лежало солнце — корпус тоже в солнце: ×(1 + Lold)
-      const { front: [x, y, w, h] } = this.rects();
-      const off = document.createElement('canvas'); off.width = IMG_W; off.height = IMG_H;
-      const og = off.getContext('2d'); this.paint(og, E);
-      const sx = Math.floor(x - 40), sy = Math.floor(y - 30), sw = Math.ceil(w + 80), shh = Math.ceil(h + 50);
       const sm = document.createElement('canvas'); sm.width = IMG_W; sm.height = IMG_H;
       const sg = sm.getContext('2d', { willReadFrequently: true }); sg.drawImage(sunImg, 0, 0, IMG_W, IMG_H);
-      try {
-        const L = sg.getImageData(sx, sy, sw, shh).data, P = og.getImageData(sx, sy, sw, shh);
-        for (let i = 0; i < P.data.length; i += 4) {
-          if (!P.data[i + 3]) continue;
-          const v = L[i] / 255, k = Math.pow(1 + 12 * v * v, 1 / 2.2);
-          P.data[i] = Math.min(255, P.data[i] * k); P.data[i + 1] = Math.min(255, P.data[i + 1] * k); P.data[i + 2] = Math.min(255, P.data[i + 2] * k);
-        }
-        og.putImageData(P, sx, sy);
-      } catch (_) {}
-      g.drawImage(off, 0, 0);
-    } else this.paint(g, E);
+      const { front: [x, y, w, h] } = this.rects();
+      for (const [sx, sy, sw, shh] of [[Math.floor(x - 40), Math.floor(y - 30), Math.ceil(w + 80), Math.ceil(h + 50)], [930, 408, 84, 116]]) {
+        try {
+          const L = sg.getImageData(sx, sy, sw, shh).data, P = lg.getImageData(sx, sy, sw, shh);
+          for (let i = 0; i < P.data.length; i += 4) {
+            if (!P.data[i + 3]) continue;
+            const v = L[i] / 255, k = Math.pow(1 + 12 * v * v, 1 / 2.2);
+            P.data[i] = Math.min(255, P.data[i] * k); P.data[i + 1] = Math.min(255, P.data[i + 1] * k); P.data[i + 2] = Math.min(255, P.data[i + 2] * k);
+          }
+          lg.putImageData(P, sx, sy);
+        } catch (_) {}
+      }
+    }
+    g.drawImage(layer, 0, 0);
     g.restore();
     return cv;
   },
@@ -4276,12 +4362,131 @@ const VCR = {
 };
 const lerp2 = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
 
+/* ==========================================================================
+   7f. ПАЧКА ДРАЖЕ (вместо размытой упаковки на полке)
+   Своя, придуманная упаковка 90-х: фольгированный пакетик с гребешками швов,
+   надпись «ДРАЖЕ», рассыпь цветных конфет, звёздочка «НОВИНКА!». Рисуется кодом
+   в нужном свете каждой сцены — и в картинку комнаты, и как вырезка для анимации.
+   ========================================================================== */
+const Pack = {
+  LIGHT: {    // во сколько раз (линейно) свет на полке по сценам
+    day: [0.5, 0.48, 0.44], sunset: [0.5, 0.35, 0.25], evening: [0.4, 0.29, 0.19], overcast: [0.2, 0.22, 0.24],
+    storm: [0.16, 0.175, 0.2], night: [0.012, 0.014, 0.022],
+  },
+  urls: {},
+  /* рисуем в коробке вырезки 71×104 (пиксели картинки), k — масштаб */
+  draw(g, k, E, glossDir = 0.6) {
+    const c = (rgb, m = 1) => `rgb(${rgb.map((v, i) => clamp(Math.round(255 * Math.pow(Math.pow(v / 255, 2.2) * E[i] * m, 1 / 2.2)), 0, 255)).join(',')})`;
+    g.save(); g.scale(k, k);
+    const x = 13, y = 13, w = 46, h = 79;
+    // форма: пухлый пакет — бока чуть выгнуты, сверху и снизу зубчатые швы
+    const body = () => {
+      g.beginPath();
+      g.moveTo(x + 1, y + 6);
+      g.quadraticCurveTo(x - 1.5, y + h / 2, x + 1, y + h - 6);
+      g.lineTo(x + w - 1, y + h - 6);
+      g.quadraticCurveTo(x + w + 1.5, y + h / 2, x + w - 1, y + 6);
+      g.closePath();
+    };
+    // тень на стенку витрины
+    g.save(); g.shadowColor = 'rgba(0,0,0,.45)'; g.shadowBlur = 4 * k; g.shadowOffsetX = -2 * k; g.shadowOffsetY = 1 * k;
+    g.fillStyle = '#000'; body(); g.fill(); g.restore();
+    // фон — фиолетово-синий градиент
+    g.save(); body(); g.clip();
+    const bg = g.createLinearGradient(x, y, x + w * 0.4, y + h);
+    bg.addColorStop(0, c([120, 40, 150])); bg.addColorStop(0.55, c([40, 50, 170])); bg.addColorStop(1, c([20, 30, 110]));
+    g.fillStyle = bg; g.fillRect(x - 3, y, w + 6, h);
+    // лучи-«взрыв» за надписью
+    g.globalAlpha = 0.18; g.fillStyle = c([255, 230, 120]);
+    for (let i = 0; i < 12; i++) { const a = i / 12 * Math.PI * 2; g.beginPath(); g.moveTo(x + w / 2, y + 30); g.lineTo(x + w / 2 + Math.cos(a) * 40, y + 30 + Math.sin(a) * 40); g.lineTo(x + w / 2 + Math.cos(a + 0.18) * 40, y + 30 + Math.sin(a + 0.18) * 40); g.closePath(); g.fill(); }
+    g.globalAlpha = 1;
+    // надпись
+    g.save(); g.translate(x + w / 2, y + 25); g.rotate(-0.12);
+    g.font = `900 12.5px "Arial Black", "Arial", sans-serif`; g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.lineJoin = 'round'; g.lineWidth = 3.2; g.strokeStyle = c([150, 20, 30]); g.strokeText('ДРАЖЕ', 0, 0);
+    const tg = g.createLinearGradient(0, -6, 0, 6); tg.addColorStop(0, c([255, 245, 140], 1.1)); tg.addColorStop(1, c([255, 170, 30]));
+    g.fillStyle = tg; g.fillText('ДРАЖЕ', 0, 0);
+    g.font = `bold 4.6px "Arial Narrow", Arial, sans-serif`; g.fillStyle = c([255, 255, 255]); g.fillText('фруктовое ассорти', 0, 9);
+    g.restore();
+    // рассыпь драже: блестящие «линзочки»
+    const cols = [[230, 40, 40], [250, 200, 30], [60, 170, 60], [240, 120, 20], [150, 60, 200], [240, 240, 240]];
+    let seed = 7; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+    for (let i = 0; i < 16; i++) {
+      const cx = x + 6 + rnd() * (w - 12), cy = y + 44 + rnd() * 26, r = 3 + rnd() * 1.6, a = rnd() * Math.PI;
+      g.save(); g.translate(cx, cy); g.rotate(a);
+      g.fillStyle = c(cols[i % cols.length]); g.beginPath(); g.ellipse(0, 0, r, r * 0.72, 0, 0, Math.PI * 2); g.fill();
+      g.fillStyle = c([255, 255, 255], 1.2); g.globalAlpha = 0.7; g.beginPath(); g.ellipse(-r * 0.3, -r * 0.25, r * 0.35, r * 0.18, -0.4, 0, Math.PI * 2); g.fill();
+      g.restore();
+    }
+    // долька апельсина и вишенка
+    g.fillStyle = c([250, 150, 30]); g.beginPath(); g.arc(x + w - 9, y + 66, 6, Math.PI, 0); g.fill();
+    g.strokeStyle = c([255, 230, 170]); g.lineWidth = 0.6; for (let i = 1; i < 6; i++) { const a = Math.PI + i * Math.PI / 6; g.beginPath(); g.moveTo(x + w - 9, y + 66); g.lineTo(x + w - 9 + Math.cos(a) * 5.2, y + 66 + Math.sin(a) * 5.2); g.stroke(); }
+    g.fillStyle = c([190, 20, 40]); g.beginPath(); g.arc(x + 9, y + 72, 3.2, 0, Math.PI * 2); g.arc(x + 14, y + 73.5, 3, 0, Math.PI * 2); g.fill();
+    g.strokeStyle = c([60, 120, 40]); g.lineWidth = 0.7; g.beginPath(); g.moveTo(x + 9, y + 69); g.quadraticCurveTo(x + 12, y + 63, x + 15, y + 65); g.moveTo(x + 14, y + 70.5); g.lineTo(x + 15, y + 65); g.stroke();
+    // звёздочка «НОВИНКА!»
+    g.save(); g.translate(x + w - 9, y + 11); g.rotate(0.3);
+    g.fillStyle = c([240, 30, 40]); g.beginPath();
+    for (let i = 0; i < 16; i++) { const r = i % 2 ? 4.2 : 7, a = i / 16 * Math.PI * 2; g.lineTo(Math.cos(a) * r, Math.sin(a) * r); } g.closePath(); g.fill();
+    g.fillStyle = c([255, 255, 255]); g.font = `bold 2.6px Arial, sans-serif`; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText('НОВИНКА!', 0, 0.2);
+    g.restore();
+    g.fillStyle = c([230, 230, 240]); g.font = `bold 3.4px Arial, sans-serif`; g.textAlign = 'left'; g.fillText('40 г', x + 4, y + h - 9.5);
+    // фольга: блики и складки
+    const gl = g.createLinearGradient(x, 0, x + w, 0);
+    const a0 = glossDir > 0 ? 0.62 : 0.2;
+    gl.addColorStop(0, 'rgba(255,255,255,0)'); gl.addColorStop(a0 - 0.1, 'rgba(255,255,255,0)'); gl.addColorStop(a0, `rgba(255,255,255,${0.32 * Math.min(1, E[1] * 2)})`); gl.addColorStop(a0 + 0.08, 'rgba(255,255,255,0)'); gl.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = gl; g.fillRect(x - 3, y, w + 6, h);
+    const sh = g.createLinearGradient(x, 0, x + w, 0); sh.addColorStop(0, 'rgba(0,0,0,.35)'); sh.addColorStop(0.15, 'rgba(0,0,0,0)'); sh.addColorStop(0.85, 'rgba(0,0,0,0)'); sh.addColorStop(1, 'rgba(0,0,0,.4)');
+    g.fillStyle = sh; g.fillRect(x - 3, y, w + 6, h);
+    g.restore();
+    // зубчатые швы сверху и снизу (серебристая фольга)
+    for (const [sy, dir] of [[y, 1], [y + h - 7, -1]]) {
+      g.fillStyle = c([200, 200, 210], 0.95);
+      g.beginPath(); g.moveTo(x + 0.5, sy + (dir > 0 ? 7 : 0));
+      for (let i = 0; i <= 18; i++) g.lineTo(x + 0.5 + i * (w - 1) / 18, sy + (dir > 0 ? (i % 2 ? 0 : 1.6) : (i % 2 ? 7 : 5.4)));
+      g.lineTo(x + w - 0.5, sy + (dir > 0 ? 7 : 0)); g.closePath(); g.fill();
+      g.strokeStyle = c([150, 150, 160]); g.lineWidth = 0.3;
+      for (let i = 1; i < 18; i++) { const xx = x + 0.5 + i * (w - 1) / 18; g.beginPath(); g.moveTo(xx, sy + 1.6); g.lineTo(xx, sy + 5.4); g.stroke(); }
+    }
+    g.restore();
+  },
+  /* вырезка для анимации (×3 для чёткости) */
+  spriteURL(scene) {
+    if (this.urls[scene]) return this.urls[scene];
+    const k = 3, cv = document.createElement('canvas'); cv.width = 71 * k; cv.height = 104 * k;
+    this.draw(cv.getContext('2d'), k, this.LIGHT[scene] || this.LIGHT.day, scene === 'evening' ? -1 : 0.6);
+    return (this.urls[scene] = cv.toDataURL('image/png'));
+  },
+  /* в картинку сцены: сначала «чистая подложка» поверх старой пачки, потом новая пачка */
+  compose(g, plate, scene, sunK) {
+    const [bx, by] = [936, 414];
+    if (plate && plate.complete && plate.naturalWidth) g.drawImage(plate, bx, by, 71, 104);
+    g.save(); g.translate(bx, by);
+    const E = (this.LIGHT[scene] || this.LIGHT.day).map(v => v * (sunK || 1));
+    this.draw(g, 1, E, scene === 'evening' ? -1 : 0.6);
+    g.restore();
+  },
+};
+
 /* ---------- микро-эффекты ---------- */
 const FX = {
   wrap: $('#fx'),
   px(z) { const s = state.stage; return { x: z.x / 100 * s.w, y: z.y / 100 * s.h, w: z.w / 100 * s.w, h: z.h / 100 * s.h, u: s.u }; },
   add(cls, x, y, html = '') { const el = document.createElement('div'); el.className = cls; el.style.left = x + 'px'; el.style.top = y + 'px'; el.innerHTML = html; this.wrap.appendChild(el); return el; },
   run(el, frames, opts) { const a = el.animate(frames, opts); a.onfinish = () => el.remove(); return a; },
+  /* драже подпрыгивают над пачкой и падают обратно */
+  candies(z) {
+    const p = this.px(z), cols = ['#e63a3a', '#f5c623', '#3fae4a', '#f07a1c', '#9446d0', '#f2f2f2'];
+    for (let i = 0; i < 9; i++) {
+      const el = this.add('candy-fx', p.x + rand(0.3, 0.7) * p.w, p.y + p.h * 0.12);
+      el.style.background = `radial-gradient(circle at 35% 30%, rgba(255,255,255,.85) 0 18%, ${cols[i % cols.length]} 22%)`;
+      const dx = rand(-16, 16) * p.u, up = -rand(14, 30) * p.u, delay = rand(250, 1300), d = rand(700, 1000);
+      this.run(el, [
+        { transform: 'translate(0,0) scale(.6)', opacity: 0 },
+        { transform: `translate(${dx * 0.5}px, ${up}px) scale(1) rotate(${rand(-90, 90)}deg)`, opacity: 1, offset: 0.45 },
+        { transform: `translate(${dx}px, ${p.h * 0.1}px) scale(.8) rotate(${rand(-180, 180)}deg)`, opacity: 0 },
+      ], { duration: d, delay, easing: 'cubic-bezier(.2,.6,.4,1)', fill: 'backwards' });
+    }
+  },
   bubbles(z) {
     const p = this.px(z);
     for (let i = 0; i < 12; i++) {

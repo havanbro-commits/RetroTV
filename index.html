@@ -4,8 +4,22 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Tube TV</title>
-  <!-- v0.7.1 -->
-  <meta name="description" content="Комната середины 90-х: ламповый телевизор, июньский свет, жизнь квартиры вокруг.">
+  <!-- v0.8 -->
+  <meta name="description" content="Комната середины 90-х: ламповый телевизор, июньский закат, радиоточка и тюль на ветру. Включите телевизор и посидите немного.">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Tube TV — комната девяностых">
+  <meta property="og:description" content="Ламповый телевизор, июньский закат, радиоточка и тюль на ветру. Включите телевизор и посидите немного.">
+  <meta property="og:url" content="https://havanbro-commits.github.io/RetroTV/">
+  <meta property="og:image" content="https://havanbro-commits.github.io/RetroTV/assets/og.jpg">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:locale" content="ru_RU">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Tube TV — комната девяностых">
+  <meta name="twitter:description" content="Ламповый телевизор, июньский закат, радиоточка и тюль на ветру.">
+  <meta name="twitter:image" content="https://havanbro-commits.github.io/RetroTV/assets/og.jpg">
+  <link rel="icon" type="image/png" sizes="64x64" href="assets/icon-64.png">
+  <link rel="apple-touch-icon" href="assets/icon-180.png">
   <meta name="theme-color" content="#1a110a">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -14,6 +28,10 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
+  <div id="boot" class="boot" aria-hidden="true">
+    <div class="boot-in"><span class="boot-logo">TUBE&nbsp;TV</span><span class="boot-txt">настройка<span class="boot-dots"><b>.</b><b>.</b><b>.</b></span></span></div>
+    <i class="boot-line"></i>
+  </div>
   <div id="app">
     <!-- Размытая подложка: видна, только если сцена не закрывает экран целиком (вертикальный телефон) -->
     <div class="backdrop" aria-hidden="true"></div>

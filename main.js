@@ -126,7 +126,7 @@ function placeEl(el, z) {
 /* ==========================================================================
    2. СЦЕНА: время суток (торшер) × погода (окно), фон, тюль на ветру
    ========================================================================== */
-const sceneOf = (time, weather) => (weather === 'clear' || time === 'evening') ? time : (weather === 'downpour' ? 'storm' : 'overcast');
+const sceneOf = (time, weather) => (weather === 'clear' || time === 'evening' || time === 'night') ? time : (weather === 'downpour' ? 'storm' : 'overcast');
 const sceneFx = () => {
   const f = Object.assign({}, CFG.light.scenes[state.scene]);
   f.dim = state.mode === 'evening' && state.weather === 'downpour' ? 0.1 : 0;
@@ -136,11 +136,10 @@ const sceneFx = () => {
 /* ==========================================================================
    2a. КОМНАТА НА WebGL
    Одна сцена вместо стопки картинок. Дневная фотография раскладывается на
-   «комнату» и карту солнечных пятен (assets/sunmap.webp). На закате карта
-   поворачивается и вытягивается вокруг окна — лучи ложатся ниже и длиннее,
-   свет краснеет, комната темнеет. Всё это плавно, на глазах.
-   Тюль — тот же шейдер: бегущие складки с подсветкой и мягкий «парус» порыва.
-   Если WebGL недоступен, работает старая схема из картинок (BG).
+   «комнату» и карту солнечных пятен (assets/sunmap.webp). На закате старые пятна
+   снимаются, а новые рассчитываются: у каждого пикселя есть точка в комнате,
+   луч из неё к солнцу проходит окно балконного блока, тюль и листву во дворе.
+   Ночью тот же расчёт делается для фонаря во дворе.
    ========================================================================== */
 /* «когда браузер освободится» — после загрузки страницы и паузы */
 const idle = (fn, delay = 0) => {
@@ -149,9 +148,71 @@ const idle = (fn, delay = 0) => {
 };
 const GLRoom = {
   ok: false, dirty: true,
-  cur: { w: [1, 0, 0, 0], s: 0, k: 1 }, tw: {},
+  cur: { w: [1, 0, 0, 0], n: 0, s: 0, k: 1 }, tw: {},
   wind: { amp: 3, billow: 0, phase: 0 },
   SCENES: ['day', 'evening', 'overcast', 'storm'],
+
+  /* ---------- шейдеры ----------
+     Солнце считается честно: у каждого пикселя есть точка в комнате (карта плоскостей assets/geo.png
+     + камера), из неё луч идёт к солнцу, пересекает правую стену с балконным блоком (рамы, импосты),
+     проходит сквозь тюль (кружево из фото, размытие растёт с расстоянием — полутень от диска солнца
+     и рассеяние в ткани) и сквозь крону во дворе. Цвет — по воздушной массе (чем ниже солнце, тем
+     краснее и слабее). Лучи в воздухе — объёмный проход в уменьшенном буфере. */
+  glsl() {
+    const R = CFG.room;
+    const f = x => (+x).toFixed(5);
+    const ap = R.apertures.map(a => `ap = max(ap, rectA(H, vec4(${f(a[0])}, ${f(a[1])}, ${f(a[2])}, ${f(a[3])}), soft));`).join('\n  ');
+    const bars = R.bars.map(b => b[0] === 'z'
+      ? `ap *= 1.0 - (1.0 - smoothstep(${f(b[2] / 2)} - soft, ${f(b[2] / 2)} + soft, abs(H.x - (${f(b[1])})))) * step(${f(b[3])}, H.y) * step(H.y, ${f(b[4])});`
+      : `ap *= 1.0 - (1.0 - smoothstep(${f(b[2] / 2)} - soft, ${f(b[2] / 2)} + soft, abs(H.y - (${f(b[1])})))) * step(${f(b[3])}, H.x) * step(H.x, ${f(b[4])});`).join('\n  ');
+    return `
+const float FOC = ${f(R.f)}, CX = ${f(R.cx)}, CY = ${f(R.cy)}, CAMH = ${f(R.camH)}, XR = ${f(R.xr)}, LACEM = ${f(R.laceM)};
+float hsh(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float vn(vec2 p){ vec2 i = floor(p), f = fract(p); vec2 u = f * f * (3.0 - 2.0 * f);
+  float a = hsh(i), b = hsh(i + vec2(1.0, 0.0)), c = hsh(i + vec2(0.0, 1.0)), d = hsh(i + vec2(1.0, 1.0));
+  return a + (b - a) * u.x + (c - a) * u.y + (a - b - c + d) * u.x * u.y; }
+float fbm3(vec2 p){ float s = 0.0, a = 0.5, t = 0.0; for (int i = 0; i < 3; i++){ s += a * vn(p); t += a; p = p * 2.03 + vec2(1.7, 9.2); a *= 0.5; } return s / t; }
+float fbm4(vec2 p){ float s = 0.0, a = 0.5, t = 0.0; for (int i = 0; i < 4; i++){ s += a * vn(p); t += a; p = p * 2.03 + vec2(1.7, 9.2); a *= 0.5; } return s / t; }
+float rectA(vec2 H, vec4 r, float soft){
+  return smoothstep(r.x - soft, r.x + soft, H.x) * smoothstep(-r.y - soft, -r.y + soft, -H.x)
+       * smoothstep(r.z - soft, r.z + soft, H.y) * smoothstep(-r.w - soft, -r.w + soft, -H.y);
+}
+/* проём балконного блока в точке H = (z, высота над полом) на плоскости правой стены */
+float aperture(vec2 H, float soft){
+  float ap = 0.0;
+  ${ap}
+  ${bars}
+  return ap;
+}
+/* точка комнаты и нормаль по номеру плоскости */
+bool roomPoint(vec2 p, float id, out vec3 P, out vec3 N){
+  float Z = 0.0; N = vec3(0.0, 0.0, 1.0);
+  if (id < 0.5) return false;
+  else if (id < 1.5) Z = 4.0;
+  else if (id < 2.5) Z = 4.42;
+  else if (id < 3.5) Z = 3.95;
+  else if (id < 4.5) Z = 4.22;
+  else if (id < 5.5) Z = 4.45;
+  else if (id < 6.5) { Z = 3.75; N = vec3(0.0, 0.25, 0.968); }
+  else if (id < 7.5) { Z = FOC * CAMH / max(p.y - CY, 0.5); N = vec3(0.0, 1.0, 0.0); }
+  else { Z = 2.6 - clamp((p.y - 690.0) / 334.0, 0.0, 1.0) * 1.1; N = vec3(0.123, 0.738, 0.663); }
+  P = vec3((p.x - CX) / FOC * Z, -(p.y - CY) / FOC * Z, -Z);
+  return true;
+}
+/* крона во дворе: просветы между деревьями (крупно) и листья (мелко), полутень от диска */
+float foliage(vec3 P, vec3 s, float tw, float detail){
+  float t = (XR + 6.0 - P.x) / s.x;
+  vec2 C = vec2(P.z + t * s.z, P.y + t * s.y + CAMH);
+  float gaps = fbm3(C * vec2(0.55, 0.5) + vec2(3.1, 7.7));
+  float dens = smoothstep(0.30, 0.55, gaps) * (1.0 - smoothstep(13.0, 16.0, C.y)) * smoothstep(-2.0, 1.5, C.y);
+  if (dens < 0.01) return 0.0;
+  float sway = sin(uTime * 0.7 + C.y * 0.4) * 0.035 * (0.4 + uGust);
+  float n = detail > 0.5 ? fbm4(vec2((C.x + sway) * 4.2, C.y * 4.6)) : fbm3(vec2((C.x + sway) * 4.2, C.y * 4.6));
+  float pen = clamp((t - tw) * 0.0093 * 4.4, 0.03, 0.4);
+  return dens * smoothstep(0.47 - pen, 0.47 + pen, n) * 0.95;
+}
+`;
+  },
 
   init() {
     const c = document.createElement('canvas');
@@ -159,21 +220,28 @@ const GLRoom = {
     const gl = c.getContext('webgl', { alpha: false, antialias: false, premultipliedAlpha: false, preserveDrawingBuffer: true, powerPreference: 'high-performance' });
     if (!gl) return Promise.reject(new Error('no webgl'));
     this.c = c; this.gl = gl;
-    // контекст потерян (iOS, нехватка памяти) — спокойно возвращаемся к картинкам, комната не чернеет
     c.addEventListener('webglcontextlost', e => { e.preventDefault(); this.lost(); });
+    const lodExt = gl.getExtension('EXT_shader_texture_lod');
     const VS = 'attribute vec2 a; varying vec2 v; void main(){ v = vec2(a.x * 0.5 + 0.5, 0.5 - a.y * 0.5); gl_Position = vec4(a, 0.0, 1.0); }';
-    const FS = `
-precision highp float;
+    const HEAD = `${lodExt ? '#extension GL_EXT_shader_texture_lod : enable\n' : ''}precision highp float;
 varying vec2 v;
-uniform sampler2D uDay, uEve, uOver, uStorm, uSun;
-uniform vec4 uW;            // веса сцен: день(с солнцем), вечер, морось, ливень
-uniform vec2 uImg;          // размер исходной картинки, px
+uniform vec2 uImg;
+uniform float uTime, uGust;
+uniform vec3 uSunD;
+`;
+    const DBG = /[?&]dbg=light/.test(location.search) ? '#define DBG_LIGHT\n' : '';
+    const FS = HEAD + DBG + `
+uniform sampler2D uDay, uEve, uOver, uStorm, uSun, uGeo, uLace, uShaft;
+uniform vec4 uW;            // веса сцен: день (с солнцем), вечер, морось, ливень
+uniform float uNight;       // ночь
 uniform vec4 uWin;          // окно: x0, y0, x1, y1 (px)
-uniform mat3 uMinv;         // обратное преобразование карты солнца
-uniform vec3 uAmb, uSunC, uWinC;
-uniform float uSunK, uAmp, uBillow, uPhase, uTime, uRain, uSlant;
+uniform vec3 uAmb, uSunC, uWinC, uLamp;
+uniform float uPhys, uSunK, uShaftK, uAmp, uBillow, uPhase, uRain, uSlant;
+${this.glsl()}
+float laceAt(vec2 uv, float lod){
+${lodExt ? '  return texture2DLodEXT(uLace, uv, lod).r;' : '  return texture2D(uLace, uv, lod - 2.0).r;'}
+}
 float h11(float n){ return fract(sin(n * 127.1) * 43758.5453); }
-/* струи дождя за стеклом: три слоя глубины, каждая струя — тонкая вертикальная черта со «шлейфом» */
 float rainLayer(vec2 p, float cw, float len, float speed, float seed){
   p.x += p.y * uSlant;
   float cell = floor(p.x / cw);
@@ -184,20 +252,36 @@ float rainLayer(vec2 p, float cw, float len, float speed, float seed){
   float along = smoothstep(0.0, 0.08, y) * (1.0 - smoothstep(0.08, 0.6, y));
   return across * along * step(0.35, r2);
 }
-
 vec3 lin(vec3 c){ return pow(max(c, 0.0), vec3(2.2)); }
 vec3 gam(vec3 c){ return pow(max(c, 0.0), vec3(1.0 / 2.2)); }
-float sunAt(vec2 px){
-  vec2 uv = px / uImg;
-  if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) return 0.0;
-  float s = texture2D(uSun, uv).r; return 12.0 * s * s;
+float sunAt(vec2 px){ vec2 uv = px / uImg; float s = texture2D(uSun, uv).r; return 12.0 * s * s; }
+
+/* свет, пришедший в точку P сквозь окно, тюль и листву; s — направление на источник */
+float throughWindow(vec3 P, vec3 N, vec3 s, float detail){
+  float cosT = dot(N, s);
+  if (cosT <= 0.0 || s.x <= 0.001) return 0.0;
+  float t = (XR - P.x) / s.x;
+  vec2 H = vec2(P.z + t * s.z, P.y + t * s.y + CAMH);
+  float soft = max(t * 0.0047, 0.004);
+  float ap = aperture(H, soft);
+  if (ap < 0.001) return 0.0;
+  // тюль: висит у стекла, качается от ветра; на порыве низ приподнимается — свет проходит чище
+  vec2 L = H;
+  L.x += uAmp * 0.0035 * sin(H.x * 9.0 - uPhase * 0.052 + H.y * 1.3);
+  float blur = t * 0.0028 + 0.001;                       // полутень: диск солнца + рассеяние в нитях
+  float lod = clamp(log2(blur / (LACEM / 512.0)), 0.0, 8.0);
+  float T = pow(laceAt(vec2(L.x, -L.y) / LACEM, lod), 1.9) * 1.3;
+  T = mix(T, 1.0, clamp(uBillow / 26.0, 0.0, 1.0) * smoothstep(1.3, 0.25, H.y) * 0.85);
+  float occ = foliage(P, s, t, detail);
+  return cosT * ap * T * (1.0 - occ);
 }
+
 void main(){
   vec2 p = v * uImg;
   // ---- тюль ----
   float ext = 120.0;
-  float W = uWin.z - uWin.x, H = uWin.w - uWin.y;
-  float xn = (p.x - uWin.x) / W, yn = (p.y - uWin.y) / H;
+  float W = uWin.z - uWin.x, Hh = uWin.w - uWin.y;
+  float xn = (p.x - uWin.x) / W, yn = (p.y - uWin.y) / Hh;
   float inside = step(0.0, xn) * step(yn, 1.0) * step(0.0, yn);
   float envW = inside * smoothstep(0.0, 0.14, xn) * (1.0 - smoothstep(0.95, 1.0, xn)) * smoothstep(0.03, 0.75, yn) * (1.0 - smoothstep(0.93, 0.995, yn));
   float k = 6.2831853 / 120.0;
@@ -207,62 +291,137 @@ void main(){
   float slope = (0.55 * cos(a1) + 0.60 * cos(a2) + 0.45 * cos(a3)) * k;
   float dx = uAmp * envW * wave;
   float shade = 1.0 + clamp(slope * uAmp * envW * 2.2, -0.18, 0.18);
-  // «парус»: подол уходит внутрь комнаты, верх у карниза неподвижен, у стены — тоже
   float xe = (p.x - (uWin.x - ext)) / (W + ext), e0 = ext / (W + ext);
   float prof = pow(smoothstep(0.28, 1.0, yn), 2.0) * (1.0 - smoothstep(0.80, 1.0, xe)) * smoothstep(0.0, e0 + 0.14, xe) * step(0.0, xe) * step(yn, 1.0);
   prof *= 0.8 + 0.2 * sin(xe * 9.0 + yn * 3.0 + uTime * 0.6);
   vec2 q = p + vec2(dx + uBillow * prof, -uBillow * 0.22 * prof);
   shade += uBillow * prof * 0.004 * inside;
   vec2 uq = q / uImg;
-  // ---- свет ----
   float winM = smoothstep(uWin.x - 6.0, uWin.x + 10.0, p.x) * (1.0 - smoothstep(uWin.w - 10.0, uWin.w + 6.0, p.y));
   vec3 col = vec3(0.0);
+  vec3 P, N;
+  bool room = roomPoint(p, floor(texture2D(uGeo, v).r * 255.0 / 30.0 + 0.5), P, N);
+  // ---- день и закат: снимаем «старое» солнце с фотографии и кладём рассчитанное ----
   if (uW.x > 0.001) {
     float Lold = sunAt(q);
-    vec3 m = uMinv * vec3(q, 1.0);
-    float Lnew = sunAt(m.xy) * uSunK;
+    float Lnew = Lold;
+    if (uPhys > 0.001) {
+      float Lp = room ? throughWindow(P, N, uSunD, 1.0) * uSunK : 0.0;
+#ifdef DBG_LIGHT
+      gl_FragColor = vec4(vec3(Lp / uSunK), 1.0); return;
+#endif
+      Lnew = mix(Lold, Lp, uPhys);
+    }
     vec3 ratio = mix((uAmb + Lnew * uSunC) / (1.0 + Lold), uWinC, winM);
-    col += uW.x * gam(lin(texture2D(uDay, uq).rgb) * ratio);
+    vec3 c = lin(texture2D(uDay, uq).rgb) * ratio;
+    if (uShaftK > 0.001) c += texture2D(uShaft, v).r * uShaftK * uSunC * vec3(1.0, 0.8, 0.55) * (1.0 - winM * 0.7);
+    // мягкое «плечо» вместо жёсткого обреза: в ярком оранжевом пятне красный не упирается в потолок,
+    // и рисунок кружева остаётся виден
+    vec3 sh = 0.7 + 0.45 * (1.0 - exp(-(c - 0.7) / 0.45));
+    c = mix(c, mix(c, sh, step(0.7, c)), uPhys);
+    col += uW.x * gam(c);
   }
   if (uW.y > 0.001) col += uW.y * texture2D(uEve, uq).rgb;
   if (uW.z > 0.001) col += uW.z * texture2D(uOver, uq).rgb;
   if (uW.w > 0.001) col += uW.w * texture2D(uStorm, uq).rgb;
+  // ---- ночь: торшер погашен; синева из окна, натриевый фонарь во дворе светит снизу сквозь тюль ----
+  if (uNight > 0.001) {
+    vec3 alb = lin(texture2D(uStorm, uq).rgb);
+    vec3 c = alb * vec3(0.07, 0.085, 0.14);
+    if (room) {
+      vec3 lp = vec3(XR + 7.5, -3.6, -3.3);                 // фонарь: 7,5 м от окна, ниже подоконника
+      vec3 d = lp - P; float dist = length(d);
+      float Ls = throughWindow(P, N, d / dist, 0.0) * 700.0 / (dist * dist);
+      c += alb * Ls * uLamp;
+    }
+    vec3 wn = alb * (vec3(0.10, 0.13, 0.24) + uLamp * 0.42 * pow(smoothstep(0.3, 1.0, yn), 1.5));
+    c = mix(c, wn, winM);
+    col += uNight * gam(c);
+  }
   col *= shade;
-  // ---- дождь: виден сквозь тюль там, где через него идёт свет из окна ----
   if (uRain > 0.001) {
     float lumc = dot(col, vec3(0.299, 0.587, 0.114));
     float r = rainLayer(p, 9.0, 260.0, 1.9, 1.0) * 0.55 + rainLayer(p + 37.0, 6.0, 170.0, 2.6, 7.0) * 0.35 + rainLayer(p + 71.0, 14.0, 380.0, 1.4, 13.0) * 0.6;
     float cloud = 0.5 + 0.5 * sin(uTime * 0.23) * sin(uTime * 0.071 + 1.3);
-    col *= 1.0 - winM * uRain * (0.10 + 0.10 * cloud);                 // облака гуляют — свет из окна дышит
+    col *= 1.0 - winM * uRain * (0.10 + 0.10 * cloud);
     col += winM * uRain * r * (0.25 + 0.75 * smoothstep(0.04, 0.5, lumc)) * vec3(0.30, 0.33, 0.37);
   }
   gl_FragColor = vec4(col, 1.0);
 }`;
+    /* лучи в воздухе: на каждый пиксель — марш по лучу камеры через объём комнаты */
+    const FS_SHAFT = HEAD + `
+uniform sampler2D uGeo;
+${this.glsl()}
+void main(){
+  vec2 p = v * uImg;
+  vec3 P, N;
+  float id = floor(texture2D(uGeo, v).r * 255.0 / 30.0 + 0.5);
+  float Zs = 6.0;
+  if (roomPoint(p, id, P, N)) Zs = min(-P.z, 6.0);
+  vec3 d = vec3((p.x - CX) / FOC, -(p.y - CY) / FOC, -1.0);
+  float dl = length(d);
+  float acc = 0.0;
+  float j = hsh(p + fract(uTime * 0.37) * 31.0);
+  const int STEPS = 22;
+  float z0 = 0.9, dz = (Zs - z0) / float(STEPS);
+  for (int i = 0; i < STEPS; i++){
+    float z = z0 + (float(i) + j) * dz;
+    vec3 Q = d * z;
+    if (Q.x > XR || Q.y < -CAMH || Q.y > 2.55 - CAMH) continue;
+    float t = (XR - Q.x) / uSunD.x;
+    vec2 H = vec2(Q.z + t * uSunD.z, Q.y + t * uSunD.y + CAMH);
+    float ap = aperture(H, max(t * 0.0047, 0.012));
+    if (ap < 0.001) continue;
+    acc += ap * (1.0 - foliage(Q, uSunD, t, 0.0)) * dz * dl;
+  }
+  float cosA = dot(normalize(d), uSunD), g = 0.35;
+  float phase = (1.0 - g * g) / pow(1.0 + g * g + 2.0 * g * cosA, 1.5) / 12.566;
+  gl_FragColor = vec4(vec3(clamp(acc * phase * 0.64 * 2.0, 0.0, 1.0)), 1.0);
+}`;
     const sh = (t, s) => { const o = gl.createShader(t); gl.shaderSource(o, s); gl.compileShader(o); if (!gl.getShaderParameter(o, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(o)); return o; };
-    const prog = gl.createProgram();
-    gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS)); gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FS));
-    gl.linkProgram(prog);
-    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
-    gl.useProgram(prog);
+    const mk = fs => {
+      const prog = gl.createProgram();
+      gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS)); gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, fs));
+      gl.bindAttribLocation(prog, 0, 'a');
+      gl.linkProgram(prog);
+      if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+      return prog;
+    };
+    this.prog = mk(FS); this.progS = mk(FS_SHAFT);
     const b = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, b);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
-    const loc = gl.getAttribLocation(prog, 'a'); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
-    this.u = {};
-    for (const n of ['uDay', 'uEve', 'uOver', 'uStorm', 'uSun', 'uW', 'uImg', 'uWin', 'uMinv', 'uAmb', 'uSunC', 'uWinC', 'uSunK', 'uAmp', 'uBillow', 'uPhase', 'uTime', 'uRain', 'uSlant']) this.u[n] = gl.getUniformLocation(prog, n);
-    gl.uniform2f(this.u.uImg, IMG_W, IMG_H);
+    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    const U = (prog, names) => { const o = {}; for (const n of names) o[n] = gl.getUniformLocation(prog, n); return o; };
+    this.u = U(this.prog, ['uDay', 'uEve', 'uOver', 'uStorm', 'uSun', 'uGeo', 'uLace', 'uShaft', 'uW', 'uNight', 'uImg', 'uWin', 'uAmb', 'uSunC', 'uWinC', 'uLamp',
+      'uPhys', 'uSunK', 'uShaftK', 'uSunD', 'uGust', 'uAmp', 'uBillow', 'uPhase', 'uTime', 'uRain', 'uSlant']);
+    this.uS = U(this.progS, ['uGeo', 'uImg', 'uTime', 'uSunD', 'uGust']);
+    gl.useProgram(this.progS); gl.uniform2f(this.uS.uImg, IMG_W, IMG_H); gl.uniform1i(this.uS.uGeo, 5);
+    gl.useProgram(this.prog); gl.uniform2f(this.u.uImg, IMG_W, IMG_H);
     /* Текстуры грузим по необходимости: сначала только то, что нужно текущей сцене,
        остальное — потом, в фоне. Пока картинки нет, на её месте чёрная заглушка 1×1. */
     this.srcs = { uDay: CFG.backgrounds.day.image, uEve: CFG.backgrounds.evening.image, uOver: CFG.backgrounds.overcast.image,
-      uStorm: (CFG.backgrounds.storm || CFG.backgrounds.overcast).image, uSun: CFG.sun.map };
+      uStorm: (CFG.backgrounds.storm || CFG.backgrounds.overcast).image, uSun: CFG.sun.map, uGeo: CFG.room.geo, uLace: CFG.room.lace };
     this.units = Object.keys(this.srcs); this.tex = {}; this.loading = {};
     this.units.forEach((k, i) => {
       gl.activeTexture(gl.TEXTURE0 + i);
       const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 255]));
-      for (const [p, val] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, p, val);
+      const near = k === 'uGeo', rep = k === 'uLace';
+      for (const [p, val] of [[gl.TEXTURE_MIN_FILTER, near ? gl.NEAREST : gl.LINEAR], [gl.TEXTURE_MAG_FILTER, near ? gl.NEAREST : gl.LINEAR],
+        [gl.TEXTURE_WRAP_S, rep ? gl.REPEAT : gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, rep ? gl.REPEAT : gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, p, val);
       gl.uniform1i(this.u[k], i);
       this.tex[k] = t;
     });
+    // буфер для лучей в воздухе (четверть разрешения)
+    gl.activeTexture(gl.TEXTURE7);
+    this.shaftTex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, this.shaftTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 4, 4, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    for (const [p, val] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, p, val);
+    this.fbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.shaftTex, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.uniform1i(this.u.uShaft, 7);
     return this.need(state.scene).then(() => { this.ok = true; this.resize(); this.dirty = true; return true; });
   },
   lost() {
@@ -274,7 +433,7 @@ void main(){
     const cur = BG.current; BG.current = null; BG.show(cur || state.scene, true);
   },
   /* какие текстуры нужны сцене */
-  unitsFor(scene) { return { day: ['uDay', 'uSun'], sunset: ['uDay', 'uSun'], evening: ['uEve'], overcast: ['uOver'], storm: ['uStorm'] }[scene] || []; },
+  unitsFor(scene) { return { day: ['uDay', 'uSun'], sunset: ['uDay', 'uSun', 'uGeo', 'uLace'], evening: ['uEve'], overcast: ['uOver'], storm: ['uStorm'], night: ['uStorm', 'uGeo', 'uLace'] }[scene] || []; },
   loadUnit(k) {
     if (this.loading[k]) return this.loading[k];
     const gl = this.gl, i = this.units.indexOf(k), src = this.srcs[k];
@@ -285,6 +444,7 @@ void main(){
           gl.activeTexture(gl.TEXTURE0 + i); gl.bindTexture(gl.TEXTURE_2D, this.tex[k]);
           gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
           gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, im);
+          if (k === 'uLace') { gl.generateMipmap(gl.TEXTURE_2D); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR); }
           this.dirty = true; this.loading[k].done = true; res();
         };
         (im.decode ? im.decode().catch(() => {}) : Promise.resolve()).then(up);
@@ -301,43 +461,63 @@ void main(){
     const st = state.stage, dpr = Math.min(devicePixelRatio || 1, 2);
     const w = Math.max(2, Math.round(Math.min(st.w * dpr, IMG_W * 1.25))), h = Math.round(w * IMG_H / IMG_W);
     if (this.c.width !== w || this.c.height !== h) { this.c.width = w; this.c.height = h; this.dirty = true; }
+    const sw = Math.max(2, Math.round(w / 4)), shh = Math.max(2, Math.round(h / 4));
+    if (this.gl && (this.sw !== sw || this.shh !== shh)) {
+      const gl = this.gl; this.sw = sw; this.shh = shh;
+      gl.activeTexture(gl.TEXTURE7); gl.bindTexture(gl.TEXTURE_2D, this.shaftTex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, sw, shh, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      this.shaftDirty = true;
+    }
   },
 
-  /* параметры солнца по «высоте» s: 0 — день, 1 — закат */
-  sunParams(s) {
-    const P = CFG.sun.pose, e = s * s * (3 - 2 * s);
-    const ang = P.ang * e * Math.PI / 180, sc = 1 + (P.sc - 1) * e, tx = P.tx * e, ty = P.ty * e;
-    const al = sc * Math.cos(ang), be = sc * Math.sin(ang), px = P.px, py = P.py;
-    const M = [[al, be, (1 - al) * px - be * py + tx], [-be, al, be * px + (1 - al) * py + ty]];
-    const det = al * al + be * be, ia = al / det, ib = -be / det, ic = be / det, id = al / det;   // [[ia, ib],[ic, id]] = A⁻¹
-    const itx = -(ia * M[0][2] + ib * M[1][2]), ity = -(ic * M[0][2] + id * M[1][2]);
-    const bz = (c0, c1, c2) => c0.map((_, i) => (1 - s) * (1 - s) * c0[i] + 2 * s * (1 - s) * c1[i] + s * s * c2[i]);
-    const C = CFG.sun;
-    return { minv: [ia, ic, 0, ib, id, 0, itx, ity, 1],            // mat3 по столбцам
-      amb: bz([1, 1, 1], C.mid.amb, C.amb), sun: bz([1, 1, 1], C.mid.sun, C.sun), win: bz([1, 1, 1], C.mid.win, C.win) };
+  /* ---------- солнце ----------
+     s: 0 — день (как на фотографии), 1 — низкое закатное солнце (~5°), дальше — медленно садится.
+     Высота и азимут → направление; цвет — пропускание атмосферы по воздушной массе (Kasten–Young). */
+  sunState(s) {
+    const S = CFG.sun.path;
+    const e = s <= 1 ? S.e0 * Math.pow(1 - s, 1.25) + S.e1 * s : S.e1 - (s - 1) * S.drop;
+    const a = S.a0 + (S.a1 - S.a0) * Math.min(s, 1) + Math.max(0, s - 1) * 8;
+    const er = e * Math.PI / 180, ar = a * Math.PI / 180;
+    const dir = [Math.cos(er) * Math.cos(ar), Math.sin(er), Math.cos(er) * Math.sin(ar)];
+    const em = Math.max(e, 0.5);
+    const m = 1 / (Math.sin(em * Math.PI / 180) + 0.50572 * Math.pow(em + 6.07995, -1.6364));
+    const tau = [0.075, 0.16, 0.36];
+    let col = tau.map(t => Math.exp(-t * m) / Math.exp(-t * 1.35));
+    const mx = Math.max(...col), sm = clamp(s, 0, 1);
+    const horizon = smooth(0.6, 3.2, e);
+    col = col.map(c => c * (1 + 0.35 * sm) / Math.pow(mx, 0.35) * horizon * CFG.sun.gain);
+    return { e, a, dir, col };
+  },
+  ambient(s) {
+    const C = CFG.sun, x = clamp(s, 0, 1);
+    const bz = (c0, c1, c2) => c0.map((_, i) => (1 - x) * (1 - x) * c0[i] + 2 * x * (1 - x) * c1[i] + x * x * c2[i]);
+    const fade = s > 1 ? 1 - (s - 1) * 1.2 : 1;
+    return { amb: bz([1, 1, 1], C.mid.amb, C.amb).map(v => v * fade), win: bz([1, 1, 1], C.mid.win, C.win).map(v => v * fade) };
   },
 
   target(scene) {
     const c = this.cur;
     return {
-      day: { w: [1, 0, 0, 0], s: 0, k: 1 }, sunset: { w: [1, 0, 0, 0], s: 1, k: 1 },
-      evening: { w: [0, 1, 0, 0], s: c.s, k: 0.25 },
-      overcast: { w: [0, 0, 1, 0], s: c.s, k: c.k }, storm: { w: [0, 0, 0, 1], s: c.s, k: c.k },
+      day: { w: [1, 0, 0, 0], n: 0, s: 0, k: 1 }, sunset: { w: [1, 0, 0, 0], n: 0, s: 1, k: 1 },
+      evening: { w: [0, 1, 0, 0], n: 0, s: c.s, k: 0.25 },
+      night: { w: [0, 0, 0, 0], n: 1, s: c.s, k: 0 },
+      overcast: { w: [0, 0, 1, 0], n: 0, s: c.s, k: c.k }, storm: { w: [0, 0, 0, 1], n: 0, s: c.s, k: c.k },
     }[scene];
   },
   go(scene, instant) {
     const T = this.target(scene); if (!T) return;
     if (this.ok && !this.unitsFor(scene).every(k => this.loading[k] && this.loading[k].done)) {
-      // картинка сцены ещё не пришла — дождёмся и тогда плавно перейдём
       this.need(scene).then(() => { if (state.scene === scene) this.go(scene, instant); }).catch(() => {});
       return;
     }
     const now = nowMs(), c = this.cur;
-    if (instant) { this.cur = { w: T.w.slice(), s: T.s, k: T.k }; this.tw = {}; this.dirty = true; return; }
+    this.scene = scene;
+    if (instant) { this.cur = { w: T.w.slice(), n: T.n, s: T.s, k: T.k }; this.tw = {}; this.dirty = true; this.shaftDirty = true; return; }
     const sunMs = Math.abs(T.s - c.s) * (T.s > c.s ? CFG.sun.setMs : CFG.sun.riseMs);
     this.tw = {
       w: { from: c.w.slice(), to: T.w, t0: now, d: CFG.crossfadeMs },
-      s: { from: c.s, to: T.s, t0: now, d: Math.max(1, sunMs) },
+      n: { from: c.n, to: T.n, t0: now, d: CFG.crossfadeMs * 1.4 },
+      s: { from: c.s, to: T.s, t0: now, d: Math.max(1, sunMs), ease: 'sun' },
       k: { from: c.k, to: T.k, t0: now, d: CFG.crossfadeMs },
     };
   },
@@ -345,38 +525,64 @@ void main(){
   step(t) {
     const ease = x => x < 0.5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2;
     for (const [key, tw] of Object.entries(this.tw)) {
-      const x = clamp((t - tw.t0) / tw.d, 0, 1), e = ease(x);
+      const x = clamp((t - tw.t0) / tw.d, 0, 1), e = tw.ease === 'sun' ? 1 - Math.pow(1 - x, 2.2) : ease(x);
       this.cur[key] = Array.isArray(tw.from) ? tw.from.map((f, i) => lerp(f, tw.to[i], e)) : lerp(tw.from, tw.to, e);
       if (x >= 1) delete this.tw[key];
     }
+    // на закате солнце продолжает медленно опускаться (за ~4 минуты — ещё на пару градусов)
+    if (this.scene === 'sunset' && !this.tw.s && this.cur.s >= 1) {
+      const dt = Math.min(0.1, (t - (this._st || t)) / 1000);
+      this.cur.s = Math.min(1 + CFG.sun.path.drift, this.cur.s + dt / CFG.sun.path.driftSec * CFG.sun.path.drift);
+    }
+    this._st = t;
   },
 
   render(t) {
     if (!this.ok) return;
-    const gl = this.gl, u = this.u, c = this.cur, full = this.dirty || this.busy();
-    // в покое тюль перерисовываем 30 раз в секунду (в дождь — каждый кадр); когда сидим у телевизора — окна не видно
+    const gl = this.gl, u = this.u, c = this.cur;
+    const phys = c.w[0] > 0.001 && c.s > 0.001, night = c.n > 0.001;
+    const live = phys || night;                      // свет из окна живой: тюль и листва шевелятся
+    const full = this.dirty || this.busy();
     if (!full) {
-      if (Camera.winHidden && !stageEl.classList.contains('moving')) return;
-      if (!(Weather.level > 0.001) && t - (this._lt || 0) < 31) return;
+      if (Camera.winHidden && !stageEl.classList.contains('moving') && !live) return;
+      const fps = live ? 24 : 30;
+      if (!(Weather.level > 0.001) && t - (this._lt || 0) < 1000 / fps - 2) return;
     }
     this._lt = t;
     this.step(t);
-    const sp = this.sunParams(clamp(c.s, 0, 1));
+    const sun = this.sunState(c.s), A = this.ambient(c.s);
+    const w = smooth(0, 0.18, c.s) * (phys ? 1 : 0);
+    const time = (t / 1000) % 3600, gust = clamp((state.fx && state.fx.gust) || 0, 0, 1);
+    // лучи в воздухе — в уменьшенный буфер, когда солнце движется или шевелится листва (12 раз в секунду)
+    const shaftK = phys ? w * CFG.sun.shafts : 0;
+    if (shaftK > 0.001 && (this.shaftDirty || this.tw.s || t - (this._sht || 0) > 80)) {
+      this._sht = t; this.shaftDirty = false;
+      gl.useProgram(this.progS);
+      gl.uniform3fv(this.uS.uSunD, sun.dir); gl.uniform1f(this.uS.uTime, time); gl.uniform1f(this.uS.uGust, gust);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
+      gl.disable(gl.SCISSOR_TEST);
+      gl.viewport(0, 0, this.sw, this.shh);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.useProgram(this.prog);
+    }
     gl.uniform4f(u.uW, c.w[0], c.w[1], c.w[2], c.w[3]);
-    gl.uniformMatrix3fv(u.uMinv, false, sp.minv);
-    gl.uniform3fv(u.uAmb, sp.amb); gl.uniform3fv(u.uSunC, sp.sun); gl.uniform3fv(u.uWinC, sp.win);
-    gl.uniform1f(u.uSunK, c.k);
+    gl.uniform1f(u.uNight, c.n);
+    gl.uniform3fv(u.uAmb, A.amb.map(x => lerp(1, x, smooth(0, 1, Math.min(c.s, 1))))); gl.uniform3fv(u.uSunC, sun.col.map(x => lerp(1, x, w)));
+    gl.uniform3fv(u.uWinC, A.win); gl.uniform3fv(u.uLamp, CFG.night.lamp);
+    gl.uniform1f(u.uPhys, w); gl.uniform1f(u.uSunK, CFG.sun.k * c.k); gl.uniform1f(u.uShaftK, shaftK);
+    gl.uniform3fv(u.uSunD, sun.dir); gl.uniform1f(u.uGust, gust);
     const z = zpx(CFG.zones.window);
     gl.uniform4f(u.uWin, z.x, z.y, z.x + z.w, z.y + z.h);
     gl.uniform1f(u.uAmp, REDUCED ? 0 : this.wind.amp);
     gl.uniform1f(u.uBillow, REDUCED ? 0 : this.wind.billow);
     gl.uniform1f(u.uPhase, this.wind.phase);
-    gl.uniform1f(u.uTime, (t / 1000) % 3600);
+    gl.uniform1f(u.uTime, time);
     gl.uniform1f(u.uRain, Weather.level || 0);
     gl.uniform1f(u.uSlant, 0.12 + Wind.w * 0.25);
     const W = this.c.width, H = this.c.height, kx = W / IMG_W;
     gl.viewport(0, 0, W, H);
-    if (full) { gl.disable(gl.SCISSOR_TEST); this.dirty = false; }
+    if (full || live) { gl.disable(gl.SCISSOR_TEST); this.dirty = false; }
     else {                                              // в покое перерисовываем только окно с тюлем
       const x0 = Math.max(0, Math.floor((z.x - 140) * kx)), y1 = Math.ceil((z.y + z.h + 4) * kx);
       gl.enable(gl.SCISSOR_TEST); gl.scissor(x0, H - Math.min(H, y1), W - x0, Math.min(H, y1));
@@ -619,7 +825,7 @@ function applyScene(instant) {
   state.scene = sceneOf(state.mode, state.weather);
   const b = document.body.classList;
   b.toggle('evening', state.mode === 'evening');
-  for (const k of ['day', 'sunset', 'evening']) b.toggle('time-' + k, state.mode === k);
+  for (const k of ['day', 'sunset', 'evening', 'night']) b.toggle('time-' + k, state.mode === k);
   for (const k of ['clear', 'drizzle', 'downpour']) b.toggle('weather-' + k, state.weather === k);
   root.style.setProperty('--scene', `url("${CFG.backgrounds[state.scene].image}")`);
   root.style.setProperty('--gust-rgb', (CFG.light.scenes[state.scene].gustColor || [255, 230, 190]).join(','));
@@ -1242,8 +1448,10 @@ const Embed = {
     if (!this.ch || !TV.on) { if (st === 1 || st === 3) try { this.player.mute(); this.player.pauseVideo(); } catch (_) {} this.show(false); return; }
     if (st === 1) {
       this.errors = 0; this.setStatus('playing'); this.syncVolume(); this.noCaptions();
-      // YouTube пару секунд показывает название и логотип — держим «настройку», потом открываем картинку
+      // YouTube несколько секунд после старта показывает название и кнопки (пауза, вперёд/назад) —
+      // держим «настройку», пока они не спрячутся, и только потом открываем картинку
       this._reveal = setTimeout(() => { if (this.ytState === 1) this.show(true); }, CFG.embed.revealDelayMs);
+      this.guardEnd();
       if (!this._seeked && this.ch && this.ch.randomStart) {
         this._seeked = true;
         setTimeout(() => { try { const d = this.player.getDuration(); if (d > 90) this.player.seekTo(d * rand(0.05, 0.6), true); } catch (_) {} }, 400);
@@ -1254,6 +1462,18 @@ const Embed = {
   },
   visible: false,
   show(v) { this.visible = v; this.el.classList.toggle('revealed', v); },
+  /* В последние ~20 секунд ролика YouTube выводит заставки «смотрите также» и кнопки —
+     уходим на следующий ролик заранее, под «помехи» */
+  guardEnd() {
+    clearInterval(this._endIv);
+    this._endIv = setInterval(() => {
+      if (!this.player || this.ytState !== 1 || !this.ch) return;
+      try {
+        const d = this.player.getDuration(), t = this.player.getCurrentTime();
+        if (d > 45 && d - t < (CFG.embed.endGuardSec || 22)) { clearInterval(this._endIv); this.show(false); this._seeked = false; this.next(); }
+      } catch (_) {}
+    }, 1000);
+  },
   noCaptions() {
     if (CFG.embed.captions || !this.player) return;
     try { this.player.unloadModule('captions'); } catch (_) {}
@@ -1311,6 +1531,7 @@ const Embed = {
     TV.burstUntil = nowMs() + CFG.tv.staticBurstMs;
   },
   stop() {
+    clearInterval(this._endIv);
     this.ch = null; this.el.classList.remove('on'); this.setStatus('idle'); this.show(false);
     clearTimeout(this._w1); clearTimeout(this._w2); clearTimeout(this._w3);
     try { if (this.player && this.ready) this.player.pauseVideo(); } catch (_) {}
@@ -1928,6 +2149,15 @@ const Sound = {
           this.every(rate * 0.85, rate * 1.15, t => this.cricket(t, fr, pan, bus)));
         return { stop: () => cr.forEach(c => c.stop()) };
       }));
+    } else if (key === 'night') {
+      // ночь: двор почти спит — редкие сверчки, далёкая трасса, иногда поезд вдалеке
+      h.push(this.noiseBed(bus, 'brown', 'lowpass', 260, 0.05, 0.5));
+      h.push(this.loop('crickets', bus, 0.45, () => {
+        const cr = [[4400, 0.8, 1.5], [4150, 0.5, 2.3]].map(([fr, pan, rate]) =>
+          this.every(rate * 0.8, rate * 1.4, t => this.cricket(t, fr, pan, bus)));
+        return { stop: () => cr.forEach(c => c.stop()) };
+      }));
+      h.push(this.every(70, 160, t => this.train(t, bus)));
     } else if (key === 'drizzle') {
       h.push(this.loop('rain-light', bus, 0.8, () => {
         const a = this.noiseBed(bus, 'pink', 'bandpass', 2600, 0.055, 0.55, 0.5);
@@ -1974,7 +2204,7 @@ const Sound = {
   },
   wind(w) {
     if (!this.started || !this._wind) return;
-    const t = this.ctx.currentTime, W = this._wind, k = state.mode === 'evening' ? 0.7 : 1;
+    const t = this.ctx.currentTime, W = this._wind, k = state.mode === 'evening' ? 0.7 : state.mode === 'night' ? 0.55 : 1;
     W.g1.gain.setTargetAtTime((0.008 + 0.075 * Math.pow(w, 1.6)) * k, t, 0.12);
     W.g2.gain.setTargetAtTime((0.002 + 0.05 * w * w) * k * (state.weather === 'clear' ? 1 : 0.6), t, 0.12);
     W.bp.frequency.setTargetAtTime(380 + 900 * w, t, 0.2);
@@ -2000,6 +2230,20 @@ const Sound = {
     const f = rand(1800, 4200);
     this.tone(t, { f, f2: f * 0.8, dur: rand(0.03, 0.07), vol: rand(0.006, 0.02) * (0.6 + heavy), dest: bus, pan: rand(0.4, 1) });
     this.burst(t, { dur: 0.008, vol: rand(0.01, 0.04) * (0.6 + heavy), f: rand(2500, 6000), q: 1.2, dest: bus, pan: rand(0.4, 1) });
+  },
+  /* поезд далеко за домами: нарастающий гул, перестук колёс, короткий гудок */
+  train(t, bus) {
+    const dur = rand(14, 20), n = this.noise('brown', true), lp = this.f('lowpass', 180), gn = this.g(0);
+    n.connect(lp).connect(gn); this.out(gn, bus, rand(0.3, 1)); n.start(t, Math.random() * 3); n.stop(t + dur + 0.5);
+    gn.gain.setValueAtTime(0, t); gn.gain.linearRampToValueAtTime(0.09, t + dur * 0.45); gn.gain.linearRampToValueAtTime(0, t + dur);
+    for (let k = 0, tt = t + dur * 0.2; tt < t + dur * 0.85; k++) {
+      const v = 0.012 * Math.sin(Math.PI * (tt - t) / dur);
+      this.burst(tt, { dur: 0.05, vol: v, type: 'lowpass', f: 420, kind: 'brown', dest: bus, pan: 0.6 });
+      this.burst(tt + 0.13, { dur: 0.05, vol: v * 0.8, type: 'lowpass', f: 420, kind: 'brown', dest: bus, pan: 0.6 });
+      tt += k % 4 === 3 ? 0.9 : 0.42;
+    }
+    if (Math.random() < 0.6) { const ht = t + dur * rand(0.3, 0.6); this.tone(ht, { f: 330, type: 'sawtooth', dur: 1.4, vol: 0.006, attack: 0.15, dest: bus, pan: 0.7 }); this.tone(ht, { f: 392, type: 'sawtooth', dur: 1.4, vol: 0.005, attack: 0.15, dest: bus, pan: 0.7 }); }
+    setTimeout(() => gn.disconnect(), (dur + 2) * 1000);
   },
   /* водосточная труба во время ливня */
   gutter(bus) {
@@ -2959,7 +3203,7 @@ const Puppets = {
     const cfg = p.egg.cube;
     if (p.cube && !p.cube.dirty) return p.cube;
     if (p.cube) p.cube.wrap.remove();
-    const light = { day: 0.95, sunset: 0.82, overcast: 0.6, storm: 0.45, evening: 0.6 }[state.scene] || 0.9;
+    const light = { day: 0.95, sunset: 0.82, overcast: 0.6, storm: 0.45, evening: 0.6, night: 0.22 }[state.scene] || 0.9;
     const warm = { day: 1, sunset: 1.5, overcast: 0.2, storm: 0, evening: 0.6 }[state.scene] ?? 1;
     const wrap = document.createElement('div'); wrap.className = 'cube-wrap'; wrap.hidden = true;
     const [cx, cy] = this.rel(p, cfg.center[0], cfg.center[1]);
@@ -3195,6 +3439,7 @@ const Radio = {
     day:      { c: [0.53, 0.46, 0.37], dir: 0.55 },
     sunset:   { c: [0.50, 0.35, 0.25], dir: 0.8 },
     evening:  { c: [0.40, 0.27, 0.15], dir: -0.9 },
+    night:    { c: [0.09, 0.10, 0.15], dir: 0.4 },
     overcast: { c: [0.29, 0.28, 0.29], dir: 0.3 },
     storm:    { c: [0.19, 0.19, 0.21], dir: 0.3 },
   },
@@ -3344,7 +3589,7 @@ const Radio = {
       for (let i = 0; i < id.data.length; i += 4) { const v = 128 + (Math.random() - 0.5) * 120; id.data[i] = id.data[i + 1] = id.data[i + 2] = v; id.data[i + 3] = 255; }
       ng.putImageData(id, 0, 0); this.noise = n;
     }
-    g.save(); g.globalCompositeOperation = 'source-atop'; g.globalAlpha = 0.09;   // только поверх уже нарисованного
+    g.save(); g.globalCompositeOperation = 'source-atop'; g.globalAlpha = 0.09 * clamp(lum * 2, 0.1, 1);   // только поверх уже нарисованного
     g.setTransform(1, 0, 0, 1, 0, 0); g.fillStyle = g.createPattern(this.noise, 'repeat');
     g.beginPath(); g.rect(0, 0, this.cv.width, this.cv.height); g.fill();
     g.restore();

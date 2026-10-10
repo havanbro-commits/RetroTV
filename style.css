@@ -103,8 +103,8 @@ body.seated .hires-wrap img.hires.loaded.on { opacity: 1; }
 }
 /* Плеер всегда видим: Chrome и Safari не запускают «невидимое» видео (opacity: 0).
    Пока идёт «настройка», его закрывает непрозрачная заглушка. */
-.tv-embed .cover { position: absolute; inset: 0; background: #060606; opacity: 1; transition: opacity .35s ease; pointer-events: none; }
-.tv-embed.revealed .cover { opacity: 0; }
+.tv-embed .cover { position: absolute; inset: 0; background: #060606; opacity: 1; transition: none; pointer-events: none; }   /* закрывается мгновенно — кнопки YouTube не успевают мелькнуть */
+.tv-embed.revealed .cover { opacity: 0; transition: opacity .5s ease; }
 .tv-embed i { position: absolute; inset: 0; pointer-events: none; }
 /* браузер не дал запуститься — пропускаем клик прямо в плеер YouTube */
 

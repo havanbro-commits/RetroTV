@@ -23,10 +23,11 @@ window.TUBE_TV_CONFIG = {
     evening:  { image: 'assets/room-evening.webp',  video: null, windowVideo: null },
     overcast: { image: 'assets/room-overcast.webp', video: null, windowVideo: null },   // морось
     storm:    { image: 'assets/room-storm.webp',    video: null, windowVideo: null },   // ливень
+    night:    { image: 'assets/room-night.webp',    video: null, windowVideo: null },   // ночь: торшер погашен
   },
-  startMode: 'day',                            // day | sunset | evening
+  startMode: 'day',                            // day | sunset | evening | night
   startWeather: 'clear',                       // clear | drizzle | downpour
-  timeCycle: ['day', 'sunset', 'evening'],     // клик по торшеру
+  timeCycle: ['day', 'sunset', 'evening', 'night'],     // клик по торшеру
   weatherCycle: ['clear', 'drizzle', 'downpour'],   // клик по окну
   crossfadeMs: 2600,
 
@@ -35,12 +36,28 @@ window.TUBE_TV_CONFIG = {
      amb/sun/win — множители цвета комнаты в тени, солнечных пятен и окна на закате;
      mid — «золотой час» посередине. setMs — сколько садится солнце (торшер: день → закат). */
   sun: {
-    map: 'assets/sunmap.webp',
-    pose: { ang: 8, sc: 1.33, tx: -140, ty: -115, px: 1340, py: 330 },
-    amb: [0.50, 0.40, 0.42], sun: [1.35, 0.62, 0.25], win: [1.05, 0.62, 0.35],
-    mid: { amb: [0.82, 0.72, 0.66], sun: [1.2, 0.88, 0.58], win: [1.05, 0.84, 0.62] },
-    setMs: 7000, riseMs: 4000,
+    map: 'assets/sunmap.webp',      // «старое» солнце дневной фотографии (его снимаем, когда считаем своё)
+    /* Путь солнца на закате: высота e (градусы) и азимут a (от нормали окна в комнату).
+       e0/a0 — днём, e1/a1 — низкое закатное солнце; drift — насколько ещё садится за driftSec секунд. */
+    path: { e0: 45, e1: 5, a0: 22, a1: 38, drop: 12, drift: 0.2, driftSec: 240 },
+    k: 5.6,          // яркость рассчитанных пятен (в единицах карты фото)
+    gain: 1.0,       // общий множитель цвета солнца
+    shafts: 0.16,    // лучи в воздухе
+    amb: [0.60, 0.45, 0.40], win: [1.05, 0.62, 0.35],
+    mid: { amb: [0.78, 0.66, 0.60], sun: [1.2, 0.88, 0.58], win: [1.05, 0.84, 0.62] },
+    setMs: 9000, riseMs: 5000,
   },
+  /* Геометрия комнаты для расчёта света: камера (фокус f, главная точка cx/cy в пикселях картинки,
+     высота camH над полом, м), правая стена x = xr (м), балконный блок на ней.
+     apertures — проёмы [z0, z1, h0, h1] (z — глубина, м, h — высота над полом, м);
+     bars — перемычки рам: ['z', z, ширина, h0, h1] вертикальная, ['h', h, ширина, z0, z1] горизонтальная. */
+  room: {
+    f: 1540, cx: 768, cy: 630, camH: 0.56, xr: 1.1948, laceM: 0.62,
+    geo: 'assets/geo.png', lace: 'assets/lace-t.webp',
+    apertures: [[-3.95, -3.27, 0.10, 2.36], [-3.17, -2.25, 0.86, 2.36]],
+    bars: [['h', 0.95, 0.09, -3.95, -3.27], ['h', 1.90, 0.06, -3.95, -3.27], ['z', -2.71, 0.07, 0.86, 2.36], ['h', 1.90, 0.07, -3.17, -2.25]],
+  },
+  night: { lamp: [1.0, 0.52, 0.2] },   // натриевый фонарь во дворе
 
   /* Чёткая (увеличенная нейросетью ×4) версия телевизора и ниши — подгружается,
      когда вы «садитесь перед телевизором». box — где она лежит на картинке, в пикселях. */
@@ -48,7 +65,7 @@ window.TUBE_TV_CONFIG = {
     box: [480, 250, 560, 400],
     images: { day: 'assets/hires/tv-day.webp', sunset: 'assets/hires/tv-sunset.webp',
               evening: 'assets/hires/tv-evening.webp', overcast: 'assets/hires/tv-overcast.webp',
-              storm: 'assets/hires/tv-storm.webp' },
+              storm: 'assets/hires/tv-storm.webp', night: 'assets/hires/tv-night.webp' },
   },
 
   /* Кадрирование. focus — точка, которую стараемся держать в центре экрана,
@@ -94,7 +111,7 @@ window.TUBE_TV_CONFIG = {
        прячет края кадра с надписями YouTube.
      revealDelayMs — сколько держать «настройку» после старта ролика, пока
        YouTube показывает название и логотип. */
-  embed: { crt: 0.1, overscan: 1.2, revealDelayMs: 3200, playerWidth: 1280, captions: false, lang: 'ru' },
+  embed: { crt: 0.1, overscan: 1.3, revealDelayMs: 4600, endGuardSec: 22, playerWidth: 1280, captions: false, lang: 'ru' },
 
   /* Форма кинескопа поверх зоны screen */
   screen: {
@@ -151,6 +168,7 @@ window.TUBE_TV_CONFIG = {
       overcast: { glow: 0.55, siren: 0.80, dust: 0.2,  gust: 0.10, gustColor: [190, 210, 235] },
       storm:    { glow: 0.70, siren: 0.90, dust: 0.1,  gust: 0.06, gustColor: [170, 195, 230] },
       evening:  { glow: 0.85, siren: 1.0,  dust: 0.14, gust: 0,    gustColor: [255, 220, 170] },
+      night:    { glow: 1.35, siren: 1.2,  dust: 0.06, gust: 0.05, gustColor: [255, 150, 70] },
     },
     spores: { far: 70, mid: 26, near: 5 },  // пыль-«споры»: дальний, средний, ближний (боке) слой
     sirenRed:  [255, 40, 40],
@@ -284,7 +302,7 @@ window.TUBE_TV_CONFIG = {
     power: 'Кнопка питания',
     channelKnob: 'Переключатель каналов',
     volumeKnob: 'Громкость — колёсико или потяните',
-    lamp: { day: 'Торшер — вернуть день', sunset: 'Торшер — дождаться заката', evening: 'Торшер — дождаться вечера' },
+    lamp: { day: 'Торшер — вернуть день', sunset: 'Торшер — дождаться заката', evening: 'Торшер — дождаться вечера', night: 'Торшер — погасить: пусть светит только телевизор' },
     weatherNext: { clear: 'Окно — пусть распогодится', drizzle: 'Окно — пусть моросит', downpour: 'Окно — пусть хлынет ливень' },
     weatherNow: { clear: 'Распогодилось', drizzle: 'Пасмурно, моросит', downpour: 'Ливень' },
     drape: ['Форточка закрыта — открыть чуть-чуть', 'Форточка приоткрыта — открыть настежь', 'Форточка открыта — закрыть'],

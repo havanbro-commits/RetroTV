@@ -159,6 +159,8 @@ const GLRoom = {
     const gl = c.getContext('webgl', { alpha: false, antialias: false, premultipliedAlpha: false, preserveDrawingBuffer: true, powerPreference: 'high-performance' });
     if (!gl) return Promise.reject(new Error('no webgl'));
     this.c = c; this.gl = gl;
+    // контекст потерян (iOS, нехватка памяти) — спокойно возвращаемся к картинкам, комната не чернеет
+    c.addEventListener('webglcontextlost', e => { e.preventDefault(); this.lost(); });
     const VS = 'attribute vec2 a; varying vec2 v; void main(){ v = vec2(a.x * 0.5 + 0.5, 0.5 - a.y * 0.5); gl_Position = vec4(a, 0.0, 1.0); }';
     const FS = `
 precision highp float;
@@ -263,6 +265,14 @@ void main(){
     });
     return this.need(state.scene).then(() => { this.ok = true; this.resize(); this.dirty = true; return true; });
   },
+  lost() {
+    if (!this.ok && !BG.gl) return;
+    console.warn('[Tube TV] WebGL-комната потеряла контекст — переходим на картинки');
+    this.ok = false; BG.gl = false;
+    const bg = $('#bg'); bg.classList.remove('gl'); if (this.c) this.c.remove();
+    BG.preloadAll(); BG.rebuildSway();
+    const cur = BG.current; BG.current = null; BG.show(cur || state.scene, true);
+  },
   /* какие текстуры нужны сцене */
   unitsFor(scene) { return { day: ['uDay', 'uSun'], sunset: ['uDay', 'uSun'], evening: ['uEve'], overcast: ['uOver'], storm: ['uStorm'] }[scene] || []; },
   loadUnit(k) {
@@ -361,7 +371,7 @@ void main(){
     gl.uniform1f(u.uAmp, REDUCED ? 0 : this.wind.amp);
     gl.uniform1f(u.uBillow, REDUCED ? 0 : this.wind.billow);
     gl.uniform1f(u.uPhase, this.wind.phase);
-    gl.uniform1f(u.uTime, t / 1000);
+    gl.uniform1f(u.uTime, (t / 1000) % 3600);
     gl.uniform1f(u.uRain, Weather.level || 0);
     gl.uniform1f(u.uSlant, 0.12 + Wind.w * 0.25);
     const W = this.c.width, H = this.c.height, kx = W / IMG_W;
@@ -632,7 +642,11 @@ const nextIn = (list, v) => list[(list.indexOf(v) + 1) % list.length];
    ========================================================================== */
 const VERT = `attribute vec2 p; varying vec2 vUv; void main(){ vUv = p * 0.5 + 0.5; gl_Position = vec4(p, 0.0, 1.0); }`;
 const FRAG = `
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
 precision mediump float;
+#endif
 varying vec2 vUv;
 uniform sampler2D uTex;
 uniform vec2 uRes;
@@ -701,6 +715,11 @@ const TV = {
   initGL() {
     const gl = this.canvas.getContext('webgl', { alpha: false, antialias: false, premultipliedAlpha: false, powerPreference: 'low-power' });
     if (!gl) { this.c2d = this.canvas.getContext('2d'); return; }
+    if (!this._lossBound) {                // iOS отбирает WebGL при нехватке памяти — ждём и поднимаем заново
+      this._lossBound = true;
+      this.canvas.addEventListener('webglcontextlost', e => { e.preventDefault(); this.gl = null; });
+      this.canvas.addEventListener('webglcontextrestored', () => { this.initGL(); this.resize(); });
+    }
     const sh = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
       if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; };
     try {
@@ -886,7 +905,7 @@ const TV = {
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, this.content);
       const u = this.u, W = this.canvas.width, H = this.canvas.height;
       gl.uniform2f(u.uRes, W, H);
-      gl.uniform1f(u.uTime, (t - this.t0) / 1000);
+      gl.uniform1f(u.uTime, ((t - this.t0) / 1000) % 600);   // время по кругу: на iPhone шейдер считает в 16 битах
       gl.uniform1f(u.uSx, s.sx); gl.uniform1f(u.uSy, s.sy);
       gl.uniform1f(u.uBoost, s.boost); gl.uniform1f(u.uDot, s.dot);
       gl.uniform1f(u.uStatic, st);
@@ -1191,16 +1210,24 @@ const Embed = {
       playerVars: Object.assign({ autoplay: 1, mute: 1, controls: 0, disablekb: 1, fs: 0, iv_load_policy: 3, playsinline: 1, rel: 0, cc_load_policy: CFG.embed.captions ? 1 : 0, hl: CFG.embed.lang, cc_lang_pref: CFG.embed.lang },
         s.list ? { listType: 'playlist', list: s.list } : {}, location.protocol.startsWith('http') ? { origin: location.origin } : {}),
       events: {
-        onReady: () => { this.ready = true; this.log('плеер готов'); this.shuffle(); },
+        onReady: () => {
+          this.ready = true; this.log('плеер готов');
+          if (!this.ch) { try { this.player.mute(); this.player.pauseVideo(); } catch (_) {} return; }
+          // пока плеер готовился, канал могли переключить — тогда грузим уже новый список
+          const cur = this.source(this.ch);
+          if (cur && (cur.list || null) !== (this._list || null)) this.load(cur); else this.shuffle();
+        },
         onStateChange: e => this.onState(e.data),
         onError: e => this.onError(e.data),
       },
     };
     if (s.videos) opts.videoId = pick(s.videos);
+    this._list = s.list || null;
     try { this.player = new YT.Player('ytHost', opts); }
     catch (e) { this.log('плеер не создался:', e.message); this.failed = true; this.msg = 'YouTube: ' + e.message; this.setStatus('idle'); }
   },
   load(s) {
+    this._list = s.list || null;
     try {
       if (s.list) this.player.loadPlaylist({ list: s.list, listType: 'playlist', index: 0 });
       else this.player.loadVideoById(pick(s.videos));
@@ -1211,6 +1238,8 @@ const Embed = {
   onState(st) {
     this.ytState = st; this.log('состояние', st);
     clearTimeout(this._reveal);
+    // канал уже переключили или телевизор выключили, а ролик всё-таки стартовал — глушим
+    if (!this.ch || !TV.on) { if (st === 1 || st === 3) try { this.player.mute(); this.player.pauseVideo(); } catch (_) {} this.show(false); return; }
     if (st === 1) {
       this.errors = 0; this.setStatus('playing'); this.syncVolume(); this.noCaptions();
       // YouTube пару секунд показывает название и логотип — держим «настройку», потом открываем картинку
@@ -1263,6 +1292,7 @@ const Embed = {
     const ch = this.ch, s = ch && this.source(ch); if (!s || !this.player) return;
     this._seeked = false;
     const go = (tries = 0) => {
+      if (this.ch !== ch) return;                          // за это время переключили канал
       try {
         const n = (this.player.getPlaylist && this.player.getPlaylist() || []).length;
         if (s.list && !n && tries < 10) return setTimeout(() => go(tries + 1), 400);   // плейлист ещё грузится
@@ -1646,10 +1676,22 @@ const Sound = {
       setValueAtTime: (x, t) => this.setPos(n, ...this.spot(where, x), t),
       linearRampToValueAtTime: (x, t) => this.rampPos(n, this.spot(where, x), t),
     };
-    if (fixed) this.panners.add(n);
-    else { this.panners.add(n); setTimeout(() => this.panners.delete(n), 30000); }
+    this.panners.add(n);
+    if (!fixed) setTimeout(() => this.panners.delete(n), 30000);
     return n;
   },
+  /* Общие «точки» вокруг слушателя: короткие звуки (птицы, капли, щелчки) не создают
+     каждый свой HRTF-узел, а садятся в одну из 9 позиций на своём направлении.
+     Узлов получается немного, и они не копятся. */
+  spotNode(dest, where, v) {
+    if (!this.ctx.createPanner) return dest;
+    let m = this._spots.get(dest); if (!m) { m = new Map(); this._spots.set(dest, m); }
+    const b = Math.round(clamp(v, -1, 1) * 4), key = where + b;
+    let n = m.get(key);
+    if (!n) { n = this.panner(where, b / 4, { fixed: true }); n.connect(dest); m.set(key, n); }
+    return n;
+  },
+  _spots: new WeakMap(),
   setPos(n, x, y, z, t) {
     if (n.positionX) { const at = t ?? this.ctx.currentTime; n.positionX.setValueAtTime(x, at); n.positionY.setValueAtTime(y, at); n.positionZ.setValueAtTime(z, at); }
     else if (n.setPosition) n.setPosition(x, y, z);
@@ -1670,7 +1712,7 @@ const Sound = {
     for (const [p, v] of [[this.tvPan.positionX, x], [this.tvPan.positionY, y], [this.tvPan.positionZ, z]]) { p.cancelScheduledValues(t); p.setValueAtTime(p.value, t); p.linearRampToValueAtTime(v, t + d); }
   },
   p(v, where = 'room') { return this.panner(where, v); },
-  out(node, dest, pan) { if (pan == null) { node.connect(dest); return; } const p = this.p(pan, this.where(dest)); node.connect(p).connect(dest); },
+  out(node, dest, pan) { if (pan == null) { node.connect(dest); return; } node.connect(this.spotNode(dest, this.where(dest), pan)); },
   softCurve(k) { const n = 2048, c = new Float32Array(n); for (let i = 0; i < n; i++) { const x = i / (n - 1) * 2 - 1; c[i] = Math.tanh(k * x) / k; } return c; },
   /* импульс маленькой комнаты: ранние отражения + тёплый короткий хвост */
   makeRoomImpulse(sec) {
@@ -1863,9 +1905,9 @@ const Sound = {
     else {                                                   // широкий фон: левый и правый канал шума — две точки по краям окна
       const sp = this.ctx.createChannelSplitter(2), w = this.where(bus);
       gn.connect(sp);
-      for (const [ch, dv] of [[0, -0.45], [1, 0.45]]) { const pn = this.panner(w, pan + dv, { fixed: true }); sp.connect(pn, ch).connect(bus); }
+      for (const [ch, dv] of [[0, -0.45], [1, 0.45]]) sp.connect(this.spotNode(bus, w, pan + dv), ch);
     }
-    return { stop: at => { gn.gain.setTargetAtTime(0, at, 0.3); n.stop(at + 2); } };
+    return { stop: at => { gn.gain.setTargetAtTime(0, at, 0.3); n.stop(at + 2); setTimeout(() => gn.disconnect(), 2600); } };
   },
   startGroup(key) {
     if (this.groups[key]) return;
@@ -2058,16 +2100,21 @@ const Sound = {
   },
   /* «Из другой комнаты»: срез верхов двумя фильтрами, тёплая середина, короткое эхо кухни */
   throughWall(pan = -0.55, cutoff = 1700, dest = this.events) {
-    if (!this._kitchen) {
-      this._kitchen = this.ctx.createConvolver(); this._kitchen.buffer = this.makeImpulse(0.7, 4.5);
-      const kp = this.p(pan, 'kitchen'); this._kitchen.connect(kp).connect(dest);
-    }
+    this.kitchenVerb();
     const inp = this.g(1), hp = this.f('highpass', 140), w1 = this.f('lowpass', cutoff, 0.6), w2 = this.f('lowpass', cutoff * 1.4, 0.5), body = this.f('peaking', 380, 0.9);
     body.gain.value = 4;
     inp.connect(hp).connect(w1).connect(w2).connect(body);
-    const pn = this.p(pan, 'kitchen'); body.connect(pn).connect(dest);
-    const room = this.g(0.55); body.connect(room).connect(this._kitchen);
+    body.connect(this.spotNode(dest, 'kitchen', pan));
+    const room = this.g(0.55); body.connect(room).connect(this.kitchenVerb());
     return { inp, done: () => { inp.disconnect(); body.disconnect(); room.disconnect(); } };
+  },
+  /* эхо кухни — одно на всё, подключается один раз */
+  kitchenVerb() {
+    if (!this._kitchen) {
+      this._kitchen = this.ctx.createConvolver(); this._kitchen.buffer = this.makeImpulse(0.7, 4.5);
+      this._kitchen.connect(this.spotNode(this.home, 'kitchen', -0.55));
+    }
+    return this._kitchen;
   },
   frying(t) {
     if (this.files.frying) {
@@ -2077,15 +2124,14 @@ const Sound = {
       return f.dur;
     }
     if (!this._crackle) this._crackle = this.makeCrackle();
-    if (!this._kitchen) { this._kitchen = this.ctx.createConvolver(); this._kitchen.buffer = this.makeImpulse(0.7, 4.5); }
     const dur = rand(14, 18);
     // «стена»: два низкочастотных фильтра подряд + тёплая середина
     const out = this.g(0), wall1 = this.f('lowpass', 1700, 0.6), wall2 = this.f('lowpass', 2400, 0.5), body = this.f('peaking', 380, 0.9);
     body.gain.value = 4;
     const hp = this.f('highpass', 140);
     out.connect(hp).connect(wall1).connect(wall2).connect(body);
-    const pn = this.p(-0.55, 'kitchen'); body.connect(pn).connect(this.home);
-    const room = this.g(0.55); body.connect(room).connect(this._kitchen).connect(pn);
+    body.connect(this.spotNode(this.home, 'kitchen', -0.55));
+    const room = this.g(0.55); body.connect(room).connect(this.kitchenVerb());
     out.gain.setValueAtTime(0, t); out.gain.linearRampToValueAtTime(0.75, t + 2.2);
     out.gain.setValueAtTime(0.75, t + dur - 3); out.gain.linearRampToValueAtTime(0, t + dur);
     // треск масла; сковородку то двигают, то нет — громкость «дышит»
@@ -2582,6 +2628,7 @@ const Zones = {
       el.addEventListener('contextmenu', e => { e.preventDefault(); this.turnChannel(-1); });
     }
     el.addEventListener('click', async e => {
+      if (d.id === 'radio') { Radio.click(); if (!HOVER) this.showCaption(el, 2600); return; }   // без ожиданий: Safari пускает звук только прямо в щелчке
       await Sound.start();
       const below = !!(d.egg && d.egg.fx);           // эффект поднимается вверх — подпись уводим вниз
       if (!HOVER || below) this.showCaption(el, HOVER ? 0 : 1800, below);
@@ -2994,6 +3041,7 @@ const Puppets = {
     const gl = c.getContext('webgl', { alpha: true, premultipliedAlpha: true, antialias: true });
     p.tt = { c, gl: null, dirty: true };
     if (!gl) return null;
+    c.addEventListener('webglcontextlost', e => { e.preventDefault(); c.remove(); if (p.tt && p.tt.c === c) p.tt = null; });
     const VS = 'attribute vec2 a; varying vec2 v; void main(){ v = a * 0.5 + 0.5; gl_Position = vec4(a, 0.0, 1.0); }';
     const FS = `
 #ifdef GL_FRAGMENT_PRECISION_HIGH
@@ -3122,6 +3170,7 @@ void main(){
     p.tt.gl.viewport(0, 0, w, h);
   },
   ttDraw(p, theta) {
+    if (!p.tt || !p.tt.gl) return;
     const gl = p.tt.gl;
     gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
     gl.uniform1f(p.tt.u.theta, theta);
@@ -3305,11 +3354,17 @@ const Radio = {
   label() {
     const T = CFG.text;
     if (this.prog < 0) return T.radioOff;
+    if (this.needTap) return T.radioTap;
     const now = CFG.radio.programs[this.prog].name + (this.title ? ' — ' + this.title : '') + (this.loading ? ', ' + T.radioTuning : '');
     return (this.prog === CFG.radio.programs.length - 1 ? T.radioLast : T.radioNext).replace('{now}', now);
   },
-  async click() {
-    await Sound.start();
+  /* Всё, что запускает звук, делаем прямо в обработчике клика, без ожиданий:
+     Safari разрешает play() только «внутри» жеста пользователя. */
+  click() {
+    Sound.start();
+    if (this.needTap && this.au) {                     // браузер не дал запуститься — этот щелчок просто запускает
+      this.needTap = false; this.tryPlay(); this.refresh(); return;
+    }
     const n = CFG.radio.programs.length;
     this.select(this.prog + 1 >= n ? -1 : this.prog + 1);
   },
@@ -3326,7 +3381,7 @@ const Radio = {
     const inp = S.g(1), hp = S.f('highpass', 170, 0.8), lp = S.f('lowpass', 5200, 0.7), box = S.f('peaking', 950, 1.1), low = S.f('peaking', 260, 1.2);
     box.gain.value = 4; low.gain.value = 2.5;
     const sat = ctx.createWaveShaper(); sat.curve = S.softCurve(1.8); sat.oversample = '2x';
-    const vol = S.g(state.radioVolume * 1.15), pan = S.panner('room', 0, { fixed: true });
+    const vol = S.g(0), pan = S.panner('room', 0, { fixed: true });
     S.setPos(pan, -0.55, 0.32, -2.6);                     // ниша: чуть левее и выше телевизора
     pan.refDistance = 2.7;
     inp.connect(hp).connect(low).connect(box).connect(lp).connect(sat).connect(vol).connect(pan).connect(S.master);
@@ -3336,6 +3391,17 @@ const Radio = {
     const hiss = S.noise('pink'), hf = S.f('bandpass', 3000, 0.6), hs = S.g(0); hiss.connect(hf).connect(hs).connect(inp); hiss.start(0, Math.random() * 3);
     return (this._chain = { inp, vol, hg, hs });
   },
+  /* звук готов (AudioContext поднят) — подключаем элемент к фильтру и включаем фон сети */
+  wire() {
+    if (!Sound.started) return;
+    const c = this.chain();
+    if (this.au && this.au._cors && !this.au._src) {
+      try { this.au._src = Sound.ctx.createMediaElementSource(this.au); this.au._src.connect(c.inp); }
+      catch (_) { this.au._src = null; }
+    }
+    this.bed(this.prog >= 0);
+    this.fade(this.prog >= 0 && !this.loading ? 1 : 0, 0.4);
+  },
   bed(on) {
     const c = this.chain(); if (!c) return;
     const t = Sound.ctx.currentTime;
@@ -3344,60 +3410,71 @@ const Radio = {
   setVolume(v) {
     state.radioVolume = clamp(v, 0, 1);
     try { localStorage.setItem('tubetv.radio', String(state.radioVolume)); } catch (_) {}
-    if (this._chain) this._chain.vol.gain.setTargetAtTime(state.radioVolume * 1.15, Sound.ctx.currentTime, 0.05);
-    if (this.plain) this.plain.volume = state.muted ? 0 : state.radioVolume;
+    if (this._chain && this.prog >= 0 && !this.loading) this._chain.vol.gain.setTargetAtTime(state.radioVolume * 1.15, Sound.ctx.currentTime, 0.05);
+    this.syncMute();
     const mx = $('#mxRadio'); if (mx && +mx.value !== state.radioVolume) mx.value = state.radioVolume;
     this.draw();
   },
-  syncMute() { if (this.plain) this.plain.volume = state.muted ? 0 : state.radioVolume; },
-  /* Аудиоэлемент. Сначала — с CORS (тогда звук идёт через фильтр и объём);
-     если архив не разрешит — обычный элемент без обработки. */
+  /* простой элемент (без CORS) не проходит через Web Audio: громкость и «без звука» — у него самого.
+     На iPhone volume у элемента только для чтения, поэтому выключаем через muted. */
+  syncMute() {
+    const a = this.au; if (!a || a._cors) return;
+    a.muted = state.muted;
+    try { a.volume = state.radioVolume; } catch (_) {}
+  },
+  /* Аудиоэлемент: сначала — с CORS (звук идёт через фильтр динамика и объём);
+     если архив его не отдаст — обычный элемент без обработки. */
   audio() {
     if (this.au) return this.au;
-    const a = new Audio(); a.preload = 'none';
-    if (!this.noCors) {
-      a.crossOrigin = 'anonymous';
-      try { const src = Sound.ctx.createMediaElementSource(a); src.connect(this.chain().inp); this.routed = true; }
-      catch (_) { this.routed = false; }
-    }
-    a.addEventListener('ended', () => this.next(true));
-    a.addEventListener('playing', () => { this.loading = false; this.fails = 0; this.refresh(); });
-    a.addEventListener('waiting', () => { this.loading = true; this.refresh(); });
-    a.addEventListener('error', () => this.onError());
-    this.au = a; this.plain = this.routed ? null : a;
-    this.syncMute();
+    const a = new Audio(); a.preload = 'auto';
+    a._cors = !this.noCors;
+    if (a._cors) a.crossOrigin = 'anonymous';
+    a.addEventListener('ended', () => this.au === a && this.next(true));
+    a.addEventListener('playing', () => { if (this.au !== a) return; this.loading = false; this.fails = 0; if (!a._cors) this.plainOk = true; this.fade(1, 0.6); this.refresh(); });
+    a.addEventListener('waiting', () => { if (this.au !== a) return; this.loading = true; this.refresh(); });
+    a.addEventListener('error', () => this.au === a && this.onError());
+    this.au = a;
+    this.syncMute(); this.wire();
     return a;
+  },
+  drop() {
+    const a = this.au; if (!a) return;
+    this.au = null;
+    try { a.pause(); a.removeAttribute('src'); a.load(); } catch (_) {}
+    if (a._src) try { a._src.disconnect(); } catch (_) {}
   },
   onError() {
     if (this.prog < 0) return;
     this.fails = (this.fails || 0) + 1;
-    if (this.routed && !this.noCors && this.fails >= 1 && !this.triedPlain) {
-      // скорее всего, сервер не прислал CORS — переходим на простой элемент
-      this.triedPlain = true; this.noCors = true;
-      try { this.au.pause(); this.au.removeAttribute('src'); this.au.load(); } catch (_) {}
-      this.au = null; this.routed = false;
-      return this.next(false);
+    const cors = this.au && this.au._cors;
+    if (cors && !this.plainOk && !this.triedPlain) {
+      // возможно, сервер не прислал CORS — пробуем ту же запись обычным элементом
+      this.triedPlain = true; this.noCors = true; this.drop();
+      return this.start(this.cur, true);
     }
-    if (this.fails < 4) return setTimeout(() => this.prog >= 0 && this.next(false), 600);
+    if (!cors && !this.plainOk) { this.noCors = false; this.triedPlain = false; }   // и так не играет — дело не в CORS, возвращаемся к полному звуку
+    if (this.fails < 4) { this.drop(); return setTimeout(() => this.prog >= 0 && this.next(false), 700); }
     this.loading = false; this.refresh();
     UI.toast(CFG.text.radioFail, 4000);
   },
   select(i) {
     this.key();
-    const prev = this.prog; this.prog = i;
+    this.prog = i; this.fails = 0; this.needTap = false;
     this.draw(); this.el && this.el.classList.toggle('on', i >= 0);
     document.body.classList.toggle('radio-on', i >= 0);
     if (i < 0) {
       this.title = ''; this.loading = false;
-      if (this.au) { const a = this.au; this.fade(0, 0.25); setTimeout(() => { if (this.prog < 0) a.pause(); }, 400); }
+      const a = this.au;
+      if (a) { this.fade(0, 0.25); setTimeout(() => { if (this.prog < 0) a.pause(); }, 400); }
       this.bed(false); this.refresh();
       return;
     }
+    if (!Sound.started) Sound.start().then(() => this.wire());
     this.bed(true);
-    this.next(false, prev);
+    this.next(false);
   },
   fade(to, sec) {
-    if (this._chain) this._chain.vol.gain.setTargetAtTime(to * state.radioVolume * 1.15, Sound.ctx.currentTime, sec / 3);
+    if (this._chain) this._chain.vol.gain.setTargetAtTime(to * state.radioVolume * 1.15, Sound.ctx.currentTime, Math.max(0.01, sec / 3));
   },
   next(sequential) {
     const P = CFG.radio.programs[this.prog]; if (!P) return;
@@ -3405,21 +3482,32 @@ const Radio = {
     if (sequential && this.idx != null) idx = (this.idx + 1) % P.items.length;
     else { idx = irand(0, P.items.length - 1); if (P.items.length > 1 && idx === this.idx && this.lastProg === this.prog) idx = (idx + 1) % P.items.length; }
     this.idx = idx; this.lastProg = this.prog;
-    const it = P.items[idx], a = this.audio(), url = CFG.radio.base + it.u.split('/').map(encodeURIComponent).join('/');
+    this.start(P.items[idx], !sequential);
+  },
+  start(it, seekRandom) {
+    this.cur = it;
+    const a = this.audio(), url = CFG.radio.base + it.u.split('/').map(encodeURIComponent).join('/');
     this.title = it.t; this.loading = true; this.refresh();
     this.fade(0, 0.05);
-    a.src = url;
-    const seekRandom = !sequential;
-    const onMeta = () => {
-      a.removeEventListener('loadedmetadata', onMeta);
+    if (a._onMeta) a.removeEventListener('loadedmetadata', a._onMeta);
+    a._onMeta = () => {
+      a.removeEventListener('loadedmetadata', a._onMeta); a._onMeta = null;
       if (seekRandom && isFinite(a.duration) && a.duration > 240) {
         const span = a.duration - 120;
         try { a.currentTime = (it.long ? rand(0.05, 0.92) : rand(0, 0.6)) * span; } catch (_) {}
       }
     };
-    a.addEventListener('loadedmetadata', onMeta);
-    const p = a.play(); if (p && p.catch) p.catch(() => {});
-    setTimeout(() => this.fade(1, 0.6), 250);
+    a.addEventListener('loadedmetadata', a._onMeta);
+    a.src = url;
+    this.tryPlay();
+  },
+  tryPlay() {
+    const a = this.au; if (!a) return;
+    const p = a.play();
+    if (p && p.catch) p.catch(err => {
+      if (this.au !== a || this.prog < 0) return;
+      if (err && err.name === 'NotAllowedError') { this.needTap = true; this.loading = false; this.refresh(); if (Zones.els.radio) Zones.showCaption(Zones.els.radio, 3500); }
+    });
   },
   refresh() {
     const z = Zones.els && Zones.els.radio; if (!z) return;

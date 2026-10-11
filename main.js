@@ -32,7 +32,7 @@ const state = {
   scene: null, fx: null, fxFrom: null, fxTo: null, fxT0: 0,
   muted: false,
   ambience: (() => { try { const v = parseFloat(localStorage.getItem('tubetv.room')); if (v >= 0 && v <= 1) return v; } catch (_) {} return CFG.audio.ambienceVolume; })(),
-  vent: (() => { try { const v = parseFloat(localStorage.getItem('tubetv.vent')); if (v >= 0 && v <= 1) return v; } catch (_) {} return CFG.audio.windowLevels[CFG.audio.windowStart]; })(),
+  vent: (() => { try { const v = parseFloat(localStorage.getItem('tubetv.window')); if (v >= 0 && v <= 1) return v; } catch (_) {} return CFG.audio.windowLevels[CFG.audio.windowStart]; })(),
   tvVolume: CFG.tv.defaultVolume,
   headphones: (() => { try { const v = localStorage.getItem('tubetv.phones'); if (v === '0' || v === '1') return v === '1'; } catch (_) {} return CFG.audio.headphones !== false; })(),
   calibrating: false,
@@ -287,6 +287,7 @@ uniform vec3 uAmb, uSunC, uWinC, uLamp;
 uniform float uPhys, uSunK, uShaftK, uAmp, uBillow, uPhase, uRain, uSlant;
 uniform float uGlow, uRtx, uLampL;   // свечение фосфорного оленя, «трассировка» в хрустале, торшер
 uniform vec3 uTvC;                   // свет экрана (линейный цвет × яркость)
+uniform float uFlash;                // молния: вспышка неба за окном
 ${this.glsl()}
 float laceAt(vec2 uv, float lod){
 ${lodExt ? '  return texture2DLodEXT(uLace, uv, lod).r;' : '  return texture2D(uLace, uv, lod - 2.0).r;'}
@@ -324,6 +325,60 @@ float throughWindow(vec3 P, vec3 N, vec3 s, float detail){
   T = mix(T, 1.0, clamp(uBillow / 26.0, 0.0, 1.0) * smoothstep(1.3, 0.25, H.y) * 0.85);
   float occ = foliage(P, s, t, detail);
   return cosT * ap * T * (1.0 - occ);
+}
+
+/* ---- дождь на стекле ----
+   H — точка на плоскости окна (м). Неподвижные бусины + стекающие капли со следом.
+   Возвращает: xy — наклон поверхности воды (для преломления), z — маска воды, w — блик. */
+vec4 beads(vec2 H, float S, float dens, float seed){
+  vec2 g = H * S, id = floor(g), f = fract(g) - 0.5;
+  float h = hsh(id + seed);
+  if (h < 1.0 - dens) return vec4(0.0);
+  vec2 o = (vec2(hsh(id + seed + 1.3), hsh(id + seed + 5.1)) - 0.5) * 0.55;
+  float r = mix(0.10, 0.30, hsh(id + seed + 9.7));
+  vec2 dv = (f - o) / vec2(r, r * 1.15);
+  float d = length(dv);
+  float m = smoothstep(1.0, 0.82, d);
+  float hl = smoothstep(0.55, 0.0, length(dv - vec2(-0.35, -0.4))) * m;
+  return vec4(dv * m, m, hl);
+}
+vec4 runners(vec2 H, float t, float amt){
+  vec2 c = vec2(H.x * 34.0, H.y);
+  float col = floor(c.x), sp = hsh(vec2(col, 17.0));
+  if (sp < 1.0 - amt) return vec4(0.0);
+  float speed = 0.06 + 0.22 * hsh(vec2(col, 3.0)), per = 1.4 + 2.2 * hsh(vec2(col, 5.0));
+  float head = 2.45 - mod(t * speed + sp * 13.0, per);                    // сверху вниз
+  float wig = 0.12 * sin(H.y * 23.0 + col * 1.7) + 0.06 * sin(H.y * 61.0 + col);
+  float fx = fract(c.x) - 0.5 - wig;
+  float yy = (H.y - head) * 34.0;                                       // выше головы — след
+  vec2 dv = vec2(fx / 0.16, yy / 0.22);
+  float dh = length(dv);
+  float mh = smoothstep(1.0, 0.75, dh);
+  float trail = smoothstep(0.09, 0.03, abs(fx)) * smoothstep(0.0, 0.4, yy) * smoothstep(9.0, 0.5, yy) * 0.55;
+  float tb = smoothstep(0.35, 0.0, abs(fract(yy * 0.9 + sp) - 0.5) * 1.4 + abs(fx) * 3.0) * smoothstep(0.0, 1.0, yy) * smoothstep(9.0, 2.0, yy);
+  float m = max(mh, max(trail, tb));
+  vec2 n = mh > trail ? dv * mh : vec2(fx * 6.0, 0.0) * m;
+  return vec4(n, m, smoothstep(0.5, 0.0, length(dv - vec2(-0.3, -0.45))) * mh);
+}
+vec4 glassWater(vec2 H, float t, float rain){
+  vec4 a = beads(H, 12.0, 0.34 * rain, 0.0);
+  vec4 b = beads(H + 0.013, 22.0, 0.45 * rain, 3.0);
+  vec4 r = runners(H * vec2(0.42, 1.0), t, 0.6 * rain);
+  vec4 o = a; if (b.z > o.z) o = b; if (r.z > o.z) o = r;
+  return o;
+}
+/* мягкий узор струек на стекле — для света, прошедшего сквозь мокрое окно в комнату */
+float rivulets(vec2 H, float t){
+  float s = 0.0;
+  for (int i = 0; i < 2; i++){
+    float sc = i == 0 ? 11.0 : 19.0;
+    float cx = H.x * sc, col = floor(cx), sp = hsh(vec2(col, float(i) * 7.0 + 1.0));
+    float fx = fract(cx) - 0.5 - 0.1 * sin(H.y * 7.0 + col);
+    float band = exp(-fx * fx / 0.018) * step(0.45, sp);
+    float along = smoothstep(0.0, 0.25, fract(H.y * 2.4 + t * (0.12 + 0.25 * sp) + sp * 7.0));
+    s += band * (0.55 + 0.45 * along);
+  }
+  return s;
 }
 
 /* «RTX»: свет от светящейся статуэтки (и от экрана, и от торшера) проходит сквозь хрусталь.
@@ -457,12 +512,51 @@ void main(){
   col *= shade;
   // ---- фосфорный олень в серванте и хрусталь вокруг ----
   if (uGlow > 0.002 || (uRtx > 0.001 && (dot(uTvC, vec3(1.0)) > 0.002 || uLampL > 0.01))) col = gam(crystal(lin(col), p, uq, gx, gid));
+  // ---- дождь ----
   if (uRain > 0.001) {
+    vec3 cd = vec3((p.x - CX) / FOC, -(p.y - CY) / FOC, -1.0);
+    // свет сквозь мокрое стекло: по стенам и мебели у окна ползут мягкие тени струек
+    if (room && winM < 0.5) {
+      vec3 sky = normalize(vec3(XR + 4.0, 2.2, -3.1) - P);
+      float tt = (XR - P.x) / max(sky.x, 0.05);
+      vec2 Hs = vec2(P.z + tt * sky.z, P.y + tt * sky.y + CAMH);
+      float apw = aperture(Hs, max(tt * 0.02, 0.03));
+      if (apw > 0.01) {
+        float rv = rivulets(Hs * (1.0 / (1.0 + tt * 0.08)), uTime);
+        col *= 1.0 + uRain * apw * 0.16 * (rv - 0.45) / (1.0 + tt * 0.35);
+      }
+    }
+    // за окном: косые струи, пелена ливня, капли на стекле с преломлением
     float lumc = dot(col, vec3(0.299, 0.587, 0.114));
     float r = rainLayer(p, 9.0, 260.0, 1.9, 1.0) * 0.55 + rainLayer(p + 37.0, 6.0, 170.0, 2.6, 7.0) * 0.35 + rainLayer(p + 71.0, 14.0, 380.0, 1.4, 13.0) * 0.6;
     float cloud = 0.5 + 0.5 * sin(uTime * 0.23) * sin(uTime * 0.071 + 1.3);
-    col *= 1.0 - winM * uRain * (0.10 + 0.10 * cloud);
-    col += winM * uRain * r * (0.25 + 0.75 * smoothstep(0.04, 0.5, lumc)) * vec3(0.30, 0.33, 0.37);
+    float veil = fbm3(vec2(p.x * 0.006 + uTime * 0.05, p.y * 0.004 - uTime * 0.12));
+    col *= 1.0 - winM * uRain * (0.08 + 0.10 * cloud);
+    col = mix(col, vec3(lumc * 1.05), winM * uRain * 0.18 * smoothstep(0.35, 0.75, veil));
+    col += winM * uRain * r * (0.18 + 0.6 * smoothstep(0.04, 0.5, lumc)) * vec3(0.30, 0.33, 0.37);
+    if (winM > 0.01 && cd.x > 0.0) {
+      float tg = XR / cd.x;
+      vec2 Hg = vec2(cd.z * tg, cd.y * tg + CAMH);
+      vec4 w = glassWater(Hg, uTime, uRain);
+      if (w.z > 0.001) {
+        vec2 rq = uq - w.xy * vec2(0.009, 0.012);                         // капля — линза: картинка за ней сдвинута и перевёрнута
+        vec3 bg = uW.x * texture2D(uDay, rq).rgb + uW.y * texture2D(uEve, rq).rgb + uW.z * texture2D(uOver, rq).rgb + uW.w * texture2D(uStorm, rq).rgb
+                + uNight * texture2D(uStorm, rq).rgb * 0.35;
+        float vis = winM * (0.7 + 0.3 * smoothstep(1478.0, 1500.0, p.x));   // за тюлем капли видно чуть слабее
+        vec3 wet = bg * shade * 0.92 + w.w * vec3(0.55, 0.6, 0.66) * (0.35 + lumc);
+        col = mix(col, wet, w.z * vis * 0.85);
+        col *= 1.0 - 0.12 * vis * smoothstep(0.55, 1.0, w.z) * (1.0 - w.w);
+      }
+    }
+  }
+  // ---- молния: небо вспыхивает, свет проходит сквозь раму и тюль в комнату ----
+  if (uFlash > 0.001) {
+    vec3 c = lin(col), alb = lin(texture2D(uStorm, uq).rgb);
+    vec3 fd = normalize(vec3(1.0, 0.55, 0.3));                         // небо за окном, чуть сверху
+    float Lf = room ? throughWindow(P, N, fd, 0.0) : 0.0;
+    c += alb * uFlash * (Lf * 70.0 + 0.5) * vec3(0.8, 0.87, 1.0);
+    c += winM * uFlash * c * 4.0 * vec3(0.85, 0.9, 1.0);              // тюль просвечивает — узор остаётся
+    col = gam(c);
   }
   gl_FragColor = vec4(col, 1.0);
 }`;
@@ -511,7 +605,7 @@ void main(){
     gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
     const U = (prog, names) => { const o = {}; for (const n of names) o[n] = gl.getUniformLocation(prog, n); return o; };
     this.u = U(this.prog, ['uDayP', 'uHole', 'uDay', 'uEve', 'uOver', 'uStorm', 'uSun', 'uGeo', 'uLace', 'uShaft', 'uW', 'uNight', 'uImg', 'uWin', 'uAmb', 'uSunC', 'uWinC', 'uLamp',
-      'uPhys', 'uSunK', 'uShaftK', 'uSunD', 'uGust', 'uAmp', 'uBillow', 'uPhase', 'uTime', 'uRain', 'uSlant', 'uGlow', 'uRtx', 'uLampL', 'uTvC']);
+      'uPhys', 'uSunK', 'uShaftK', 'uSunD', 'uGust', 'uAmp', 'uBillow', 'uPhase', 'uTime', 'uRain', 'uSlant', 'uGlow', 'uRtx', 'uLampL', 'uTvC', 'uFlash']);
     this.uS = U(this.progS, ['uGeo', 'uImg', 'uTime', 'uSunD', 'uGust']);
     gl.useProgram(this.progS); gl.uniform2f(this.uS.uImg, IMG_W, IMG_H); gl.uniform1i(this.uS.uGeo, 5);
     gl.useProgram(this.prog); gl.uniform2f(this.u.uImg, IMG_W, IMG_H);
@@ -709,7 +803,7 @@ void main(){
     const phys = c.w[0] > 0.001 && c.s > 0.001, night = c.n > 0.001;
     const glow = Deer.level(c), rtx = Deer.rtxK(t), tvc = Deer.tvLight();
     const sparkle = rtx > 0.001 && (glow > 0.01 || tvc[0] + tvc[1] + tvc[2] > 0.002 || c.w[1] > 0.05);
-    const live = phys || night || sparkle;           // свет живой: тюль, листва, блики в хрустале
+    const live = phys || night || sparkle || (Weather.level || 0) > 0.01 || Weather.flash(t) > 0;   // свет живой: тюль, листва, блики, дождь
     const full = this.dirty || this.busy();
     if (!full) {
       if (Camera.winHidden && !stageEl.classList.contains('moving') && !live) return;
@@ -748,6 +842,7 @@ void main(){
     gl.uniform1f(u.uTime, time);
     gl.uniform1f(u.uRain, Weather.level || 0);
     gl.uniform1f(u.uGlow, glow); gl.uniform1f(u.uRtx, rtx); gl.uniform1f(u.uLampL, c.w[1]); gl.uniform3fv(u.uTvC, tvc);
+    gl.uniform1f(u.uFlash, Weather.flash(t));
     gl.uniform1f(u.uSlant, 0.12 + Wind.w * 0.25);
     const W = this.c.width, H = this.c.height, kx = W / IMG_W;
     gl.viewport(0, 0, W, H);
@@ -950,7 +1045,7 @@ const Wind = {
     this.phase += dt / 1000 * (10 + 75 * this.w);
     if (t - this.lastApply > 33) {                                    // ~30 к/с для фильтра
       this.lastApply = t;
-      const open = 0.25 + 0.75 * clamp(state.vent / 0.7, 0, 1);          // закрытая форточка — ветра почти нет
+      const open = 0.12 + 0.88 * clamp(state.vent, 0, 1);                // закрытое окно — тюль почти не шевелится
       const a = ((W.scaleCalm + W.scaleGust * this.w) * open / BG.DISP);   // амплитуда мелких волн
       this.billow = lerp(this.billow || 0, clamp(g / Math.max(0.01, W.gustMax), 0, 1.4) * W.billow * open, Math.min(1, dt / 90));
       const b = this.billow, P = BG._maps ? BG._maps.period : 120;
@@ -966,7 +1061,7 @@ const Wind = {
       GLRoom.wind.amp = a * BG.DISP * 0.5;                 // px
       GLRoom.wind.billow = b * (W.billowPx || 22);          // px
       GLRoom.wind.phase = this.phase;
-      Sound.wind(this.w * (0.3 + 0.7 * clamp(state.vent / 0.7, 0, 1)));
+      Sound.wind(this.w * (0.35 + 0.65 * clamp(state.vent, 0, 1)));
     }
   },
 };
@@ -1001,7 +1096,12 @@ function applyScene(instant) {
   Zones.refreshLabels();
 }
 function setMode(time) { if (time === state.mode) return; state.mode = time; applyScene(); }
-function setWeather(w) { if (w === state.weather) return; state.weather = w; applyScene(); }
+function setWeather(w) {
+  if (w === state.weather) return;
+  const was = state.weather; state.weather = w; applyScene();
+  // пошёл дождь, а окно нараспашку — подсказываем, что его можно закрыть
+  if (was === 'clear' && w !== 'clear' && state.vent > 0.5 && !setWeather._hinted) { setWeather._hinted = true; setTimeout(() => UI.toast(T.rainHint, 4200), 2800); }
+}
 const nextIn = (list, v) => list[(list.indexOf(v) + 1) % list.length];
 
 /* ==========================================================================
@@ -1521,7 +1621,7 @@ const Feed = {
     if (this._blessed) return; this._blessed = true;
     for (const v of [this.vGL, this.vDOM]) {
       if (v.getAttribute('src')) continue;
-      v._blessing = true; v.muted = true; v.src = 'assets/blank.mp4';
+      v._blessing = true; v.muted = false; v.src = 'assets/blank.mp4';   // со звуком: Safari запоминает «разрешённый» элемент
       const p = v.play(); if (p && p.catch) p.catch(() => {});
       setTimeout(() => { if (v._blessing) { v._blessing = false; try { v.pause(); } catch (_) {} v.muted = false; } }, 700);
     }
@@ -1550,8 +1650,9 @@ const Feed = {
     const r = await fetch(`${ARCHIVE}/metadata/${encodeURIComponent(it.id)}`, { mode: 'cors' });
     const j = await r.json();
     const files = (j.files || []).filter(f => /\.mp4$/i.test(f.name) && (!it.match || new RegExp(it.match, 'i').test(f.name)));
-    const plain = files.filter(f => !/\.ia\.mp4$/i.test(f.name));
-    const names = (plain.length ? plain : files).map(f => f.name);
+    // .ia.mp4 — копия, которую архив сам пережал в H.264 для просмотра в браузере: она играет везде
+    const ia = new Set(files.filter(f => /\.ia\.mp4$/i.test(f.name)).map(f => f.name.replace(/\.ia\.mp4$/i, '.mp4')));
+    const names = files.filter(f => /\.ia\.mp4$/i.test(f.name) || !ia.has(f.name)).map(f => f.name);
     this.meta[it.id] = names;
     return names.length ? this.fileUrl(it.id, pick(names)) : null;
   },
@@ -1638,6 +1739,7 @@ const Feed = {
       if (v !== this.v || !err || err.name !== 'NotAllowedError') return;
       // браузер не дал звук без клика — идём без звука, звук вернёт клик по экрану
       this.autoMuted = true; v.muted = true; v.play().catch(() => {});
+      UI.toast(T.tapForSound, 4000);
     });
   },
   onMeta(v) {
@@ -1678,8 +1780,8 @@ const Feed = {
       if (v._src) { v.muted = !!this.autoMuted; try { v.volume = 1; } catch (_) {} }   // громкость — в «динамике»
       else { v.muted = quiet; try { v.volume = state.tvVolume; } catch (_) {} }
     }
-    if (this.rt && this.status === 'playing') {
-      if (quiet) this.rtSend('player:mute');
+    if (this.rt && this.kind === 'rutube') {
+      if (quiet || !this.visible) this.rtSend('player:mute');
       else { this.rtSend('player:unMute'); this.rtSend('player:setVolume', { volume: state.tvVolume }); }
     }
   },
@@ -1699,7 +1801,7 @@ const Feed = {
     if (!it) return this.fail('нет роликов');
     for (const v of [this.vGL, this.vDOM]) try { v.pause(); } catch (_) {}
     this.item = it; this.setStatus('tuning'); this.show(false);
-    this.t0 = nowMs(); this.progress = 0; this.waitSince = 0; this.rtSeeked = false; this.rtReady = false;
+    this.t0 = nowMs(); this.progress = 0; this.waitSince = 0; this.rtSeeked = false; this.rtReady = false; this.rtT0 = null;
     this.el.classList.add('rt'); this.el.classList.remove('dom');
     let f = this.rt;
     if (!f) {
@@ -1730,17 +1832,21 @@ const Feed = {
           this.rtSend('player:setCurrentTime', { time: Math.floor(rand(0.04, 0.7) * d.duration) });
         }
         break;
-      case 'player:currentTime': this.progress = nowMs(); this.waitSince = 0; break;
+      case 'player:currentTime': {
+        this.progress = nowMs(); this.waitSince = 0;
+        const tm = +(d.time ?? d.currentTime) || 0;
+        // картинку открываем, только когда идёт сам ролик (не заставка и не реклама): время ушло вперёд
+        if (this.rtT0 == null || tm < this.rtT0) this.rtT0 = tm;
+        if (this.status === 'playing' && !this.visible && tm - this.rtT0 > 1.2) {
+          const gen = this.gen; clearTimeout(this._rev);
+          this._rev = setTimeout(() => { if (gen === this.gen && this.status === 'playing') { this.show(true); this.applyVolume(); } }, 400);
+        }
+        break;
+      }
       case 'player:changeState':
         if (d.state === 'playing') {
           this.rtHide();
-          if (this.status !== 'playing') {
-            this.setStatus('playing'); this.fails = 0; this.progress = nowMs();
-            this.applyVolume();
-            const gen = this.gen;
-            clearTimeout(this._rev);
-            this._rev = setTimeout(() => { if (gen === this.gen && this.status === 'playing') this.show(true); }, 900);
-          }
+          if (this.status !== 'playing') { this.setStatus('playing'); this.fails = 0; this.progress = nowMs(); }
         } else if (d.state === 'buffering') { if (this.status === 'playing') this.waitSince = nowMs(); }
         else if (d.state === 'pause' || d.state === 'paused') { if (this.status === 'playing' && TV.on) this.rtSend('player:play'); }
         else if (d.state === 'completed') this.next();
@@ -1760,6 +1866,7 @@ const Feed = {
     if (this.status === 'tuning' && t - this.t0 > 16000) return this.skip('долго не начинается');
     if (this.status === 'playing') {
       if (this.waitSince && t - this.waitSince > 20000) return this.skip('связь пропала');
+      if (this.kind === 'rutube' && !this.visible && t - this.t0 > 45000) return this.skip('ролик не пошёл');
       if (this.kind === 'file' && this.v && this.v.paused && !this.v.ended) this.tryPlay(this.v);
     }
   },
@@ -1961,7 +2068,7 @@ const Weather = {
     const c = this.ctx, W = this.el.width, H = this.el.height;
     c.clearRect(0, 0, W, H);
     if (this.level < 0.01) return;
-    if (BG.gl) { this.glass(c, W, H, dt); if (this.kind === 'downpour' && t > this.nextBolt && !REDUCED) { this.nextBolt = t + rand(...CFG.weather.lightningEveryMs); this.bolt(); } return; }
+    if (BG.gl) { if (this.kind === 'downpour' && t > this.nextBolt && !REDUCED) { this.nextBolt = t + rand(...CFG.weather.lightningEveryMs); this.bolt(); } return; }
     const want = Math.round(this.level * (REDUCED ? 70 : 170));
     while (this.drops.length < want) this.drops.push({ x: Math.random(), y: Math.random(), v: rand(0.9, 1.6), l: rand(0.03, 0.07) });
     if (this.drops.length > want) this.drops.length = want;
@@ -2015,7 +2122,22 @@ const Weather = {
     }
     c.restore();
   },
+  /* огибающая молнии: две-три вспышки подряд, как у настоящего разряда */
+  flash(t) {
+    const b = this._bolt; if (!b) return 0;
+    const x = (t - b.t0) / 1000;
+    if (x > 1.4) { this._bolt = null; return 0; }
+    let v = 0;
+    for (const [at, a, w] of b.pulses) v = Math.max(v, a * Math.exp(-Math.max(0, x - at) / w) * (x >= at ? 1 : 0));
+    return v;
+  },
   bolt() {
+    if (BG.gl && GLRoom.ok) {
+      this._bolt = { t0: nowMs(), pulses: [[0, rand(0.7, 1), 0.05], [rand(0.12, 0.2), rand(0.4, 0.8), 0.07], [rand(0.3, 0.5), rand(0.5, 1), 0.18]] };
+      GLRoom.dirty = true;
+      Sound.thunder(rand(0.6, 3.5));
+      return;
+    }
     const f = $('#flash');
     f.animate([{ opacity: 0 }, { opacity: 0.55, offset: 0.05 }, { opacity: 0.1, offset: 0.18 }, { opacity: 0.7, offset: 0.26 }, { opacity: 0, offset: 1 }],
       { duration: 900, easing: 'ease-out' });
@@ -2033,7 +2155,7 @@ const SOUND_NAMES = [
   'tv-on', 'tv-off', 'channel-click', 'tv-static', 'tv-testcard', 'tv-morning',
   'lamp-click', 'egg-sachet', 'egg-tamagotchi', 'egg-brickgame', 'egg-rubik', 'egg-bear', 'egg-cassette', 'egg-figurine', 'egg-teapot',
 ];
-const LOOP_NAMES = new Set(['room-tone', 'street-day', 'birds', 'children', 'street-sunset', 'swifts', 'street-evening', 'crickets', 'rain-light', 'rain-heavy', 'tv-static', 'tv-testcard', 'tv-morning']);
+const LOOP_NAMES = new Set(['rain-wash-light', 'rain-wash-heavy', 'rain-sill-light', 'rain-sill-heavy', 'room-tone', 'street-day', 'birds', 'children', 'street-sunset', 'swifts', 'street-evening', 'crickets', 'rain-light', 'rain-heavy', 'tv-static', 'tv-testcard', 'tv-morning']);
 
 const Sound = {
   ctx: null, files: {}, started: false,
@@ -2070,10 +2192,17 @@ const Sound = {
     this.roomVerb = ctx.createConvolver(); this.roomVerb.buffer = this.makeRoomImpulse(1.3);
     this.roomOut = G(0.26); this.roomVerb.connect(this.roomOut).connect(this.master);
 
-    // улица идёт через «форточку»: громкость + срез верхов, когда она прикрыта
-    this.street = this.f('lowpass', 1800 + 9000 * state.vent, 0.5);
-    this.amb = G(state.ambience * state.vent); this.amb.connect(this.street).connect(this.master);
-    this.street.connect(G(0.12)).connect(this.roomVerb);
+    /* Улица. Окно здесь — не фильтр, а модель пространства:
+       открыто — каждый звук приходит со своего места во дворе (HRTF), с отражениями от домов;
+       закрыто — двойные деревянные рамы пропускают в основном низ (закон массы), немного «воздуха»
+       сквозь щели, и вся улица звучит уже со стороны окна — как большой плоский источник,
+       а относительная доля отзвука комнаты растёт. Переход — плавный, по положению створки. */
+    this.amb = G(state.ambience); this.amb.connect(this.master);
+    this.roomSend = G(0.1); this.amb.connect(this.roomSend).connect(this.roomVerb);
+    this.yardSend = G(0.32);
+    // капли по стеклу и отливу: слышны и при закрытом окне — через раму, но глуше
+    this.pane = G(1); this.paneLP = this.f('lowpass', 20000, 0.6); this.paneG = G(1);
+    this.pane.connect(this.paneLP).connect(this.paneG).connect(this.amb);
     this.inside = G(state.ambience * 0.5); this.inside.connect(this.master); this.inside.connect(G(0.3)).connect(this.roomVerb);
     this.sfx = G(CFG.audio.sfxVolume); this.sfx.connect(this.master); this.sfx.connect(G(0.28)).connect(this.roomVerb);
     // телевизор — точечный источник впереди; когда садимся — он ближе
@@ -2087,12 +2216,17 @@ const Sound = {
     this.home = G(1); this.home.connect(this.inside);            // квартира: кухня, часы
 
     this.buf = { white: this.makeNoise('white'), pink: this.makeNoise('pink'), brown: this.makeNoise('brown') };
-    this.verb = ctx.createConvolver(); this.verb.buffer = this.makeImpulse(2.6, 3.2);
-    this.verbOut = G(0.5); this.verb.connect(this.verbOut).connect(this.amb);
+    // двор-колодец: ранние отражения от фасадов + хвост; звучит снаружи, через ту же модель окна
+    this.verb = ctx.createConvolver(); this.verb.buffer = this.makeYardImpulse(2.4);
+    this.yardSend.connect(this.verb);
+    this.verbOut = G(0.55); this.verb.connect(this.verbOut);
+    const ysp = ctx.createChannelSplitter(2); this.verbOut.connect(ysp);
+    for (const [ch, v] of [[0, -0.1], [1, 0.95]]) { const e = this.outdoorEmitter(this.amb, v, false); ysp.connect(e, ch); }
     this.stair = ctx.createConvolver(); this.stair.buffer = this.makeImpulse(3.4, 2.4);
     this.stairOut = G(0.7); this.stair.connect(this.stairOut).connect(this.amb);
 
     this.started = true;
+    this.applyVent();
     this.loadFiles();                       // файлы подменят процедурный звук, когда загрузятся
     this.startAmbience();
     Events.start();
@@ -2108,6 +2242,7 @@ const Sound = {
      куда он идёт: улица — справа за окном и ниже, кухня — сзади слева, комната — впереди. */
   where(dest) {
     if (dest === this.home) return 'kitchen';
+    if (dest === this.pane) return 'window';
     if (dest === this.events || dest === this.amb || Object.values(this.buses).includes(dest)) return 'street';
     return 'room';
   },
@@ -2116,6 +2251,7 @@ const Sound = {
     const P = (az, d, y) => { const a = az * Math.PI / 180; return [d * Math.sin(a), y, -d * Math.cos(a)]; };
     if (where === 'street') return P(30 + 55 * (v + 1) / 2, 7, -1.2);          // двор под окном: от «впереди справа» до «справа»
     if (where === 'kitchen') return P(-125 + 15 * v, 5, 0);                    // по коридору, через стену
+    if (where === 'window') return P(66 + 13 * v, 3.1, 0.35);                  // стекло окна справа: от края до края
     return P(v * 60, 2.6, 0.2);                                                 // предметы в комнате
   },
   tvPos(seated) { return seated ? [0, 0.05, -1.15] : [0, -0.15, -2.7]; },
@@ -2146,9 +2282,40 @@ const Sound = {
     let m = this._spots.get(dest); if (!m) { m = new Map(); this._spots.set(dest, m); }
     const b = Math.round(clamp(v, -1, 1) * 4), key = where + b;
     let n = m.get(key);
-    if (!n) { n = this.panner(where, b / 4, { fixed: true }); n.connect(dest); m.set(key, n); }
+    if (!n) {
+      if (where === 'street') n = this.outdoorEmitter(dest, b / 4, true);
+      else { n = this.panner(where, b / 4, { fixed: true }); n.connect(dest); }
+      m.set(key, n);
+    }
     return n;
   },
+  /* Уличный источник: открытый путь — HRTF с места во дворе; закрытый — общий для назначения
+     «проход сквозь окно»; плюс посыл в отзвук двора. Возвращает вход (gain). */
+  outdoorEmitter(dest, v, yard = true, panner) {
+    const W = this.windowPaths(dest), e = this.g(1), p = panner || this.panner('street', v, { fixed: true });
+    e.connect(p).connect(W.open);
+    e.connect(W.closedIn);
+    if (yard && this.yardSend) e.connect(this.yardSend);
+    e.pan = p.pan; e.panner = p;
+    return e;
+  },
+  windowPaths(dest) {
+    if (dest._win) return dest._win;
+    const a = state.vent, open = this.g(this.openK(a)), closedIn = this.g(1), sum = this.g(1), closed = this.g(this.closedK(a));
+    closedIn.channelCount = 1; closedIn.channelCountMode = 'explicit';
+    // стекло двойных рам: низ проходит, середина и верх гаснут; резонанс «масса — воздух — масса»
+    const g1 = this.f('lowpass', 420, 0.55), g2 = this.f('lowpass', 1100, 0.5), mam = this.f('peaking', 140, 1.1); mam.gain.value = 2.5;
+    closedIn.connect(g1).connect(g2).connect(mam).connect(sum);
+    // щели старых рам: тонкий шипящий «воздух»
+    const leak = this.f('bandpass', 2400, 0.7), lg = this.g(0.05); closedIn.connect(leak).connect(lg).connect(sum);
+    sum.connect(closed);
+    // окно звучит всей плоскостью: две точки у краёв проёма
+    for (const v of [-0.8, 0.8]) closed.connect(this.panner('window', v, { fixed: true })).connect(dest);   // две точки: каждая — половина
+    open.connect(dest);
+    return (dest._win = { open, closed, closedIn });
+  },
+  openK(a) { return Math.pow(clamp(a, 0, 1), 0.55); },
+  closedK(a) { return 0.075 * Math.pow(1 - clamp(a, 0, 1), 1.2); },   // двойные рамы: −20…−30 дБ по середине
   _spots: new WeakMap(),
   setPos(n, x, y, z, t) {
     if (n.positionX) { const at = t ?? this.ctx.currentTime; n.positionX.setValueAtTime(x, at); n.positionY.setValueAtTime(y, at); n.positionZ.setValueAtTime(z, at); }
@@ -2204,6 +2371,24 @@ const Sound = {
       }
       // мягкий шов петли
       const fade = 2048; for (let i = 0; i < fade; i++) { const k = i / fade; d[i] = d[i] * k + d[len - fade + i] * (1 - k); }
+    }
+    return b;
+  },
+  /* двор между панельными домами: отдельные «хлопки» отражений от фасадов в 15…100 м,
+     потом плотный хвост; верхи гаснут быстрее низа */
+  makeYardImpulse(sec) {
+    const ctx = this.ctx, sr = ctx.sampleRate, len = Math.floor(sec * sr), b = ctx.createBuffer(2, len, sr);
+    for (let ch = 0; ch < 2; ch++) {
+      const d = b.getChannelData(ch); let lp = 0, lp2 = 0;
+      for (let i = 0; i < len; i++) {
+        const t = i / sr, k = 0.55 * Math.exp(-t / 0.5) + 0.06;
+        const w = Math.random() * 2 - 1; lp += k * (w - lp); lp2 += 0.5 * (lp - lp2);
+        d[i] = lp2 * 0.35 * Math.exp(-t * 3.6) * Math.min(1, t / 0.05);
+      }
+      for (const [m, a] of [[15, .55], [23, .42], [31, .36], [42, .3], [55, .24], [68, .2], [86, .15], [104, .1]]) {
+        const i = Math.floor((m * 2 / 343 * (0.94 + Math.random() * 0.12) + ch * 0.0013) * sr);
+        for (let j = 0; j < 40 && i + j < len; j++) d[i + j] += a * Math.exp(-j / (6 + m / 12)) * (Math.random() < 0.5 ? -1 : 1) * (j ? 0.4 : 1);
+      }
     }
     return b;
   },
@@ -2279,10 +2464,18 @@ const Sound = {
     return clamp(0.1 / loud, 0.2, 4);
   },
   fileBuf(name) { const f = this.files[name]; return Array.isArray(f) ? pick(f) : f; },
-  playFile(name, t, dest, { vol = 1, loop = false, pan, maxDur, fadeOut = 2.5, offset = 0 } = {}) {
+  playFile(name, t, dest, { vol = 1, loop = false, pan, maxDur, fadeOut = 2.5, offset = 0, norm = true, fadeIn = 0 } = {}) {
     const b = this.fileBuf(name); if (!b) return null;
     const s = this.ctx.createBufferSource(); s.buffer = b; s.loop = loop;
-    const gn = this.g(vol * (b._norm || 1)); s.connect(gn); this.out(gn, dest, pan);
+    // петли, записанные с запасом в 1 с по краям: играем ровно период — шва нет даже у mp3
+    const per = (CFG.audio.seamless || {})[name];
+    if (loop && per && b.duration > per + 1.5) { s.loopStart = 1; s.loopEnd = 1 + per; offset = 1 + Math.random() * per; }
+    const k = vol * (norm ? (b._norm || 1) : 1), gn = this.g(fadeIn ? 0 : k); s.connect(gn);
+    if (fadeIn) { gn.gain.setValueAtTime(0, t); gn.gain.linearRampToValueAtTime(k, t + fadeIn); }
+    if (b.numberOfChannels > 1 && pan != null && Array.isArray(pan)) {     // стерео-фон: каждый канал — своя точка
+      const sp = this.ctx.createChannelSplitter(2), w = this.where(dest);
+      gn.connect(sp); sp.connect(this.spotNode(dest, w, pan[0]), 0); sp.connect(this.spotNode(dest, w, pan[1]), 1);
+    } else this.out(gn, dest, Array.isArray(pan) ? (pan[0] + pan[1]) / 2 : pan);
     s.start(t, offset);
     let dur = b.duration - offset;
     if (maxDur && !loop && dur > maxDur) {
@@ -2290,7 +2483,7 @@ const Sound = {
       gn.gain.setValueAtTime(vol * (b._norm || 1), t + dur - fadeOut); gn.gain.linearRampToValueAtTime(0, t + dur); s.stop(t + dur + 0.05);
     }
     s.onended = () => gn.disconnect();
-    return { dur, stop(at) { try { gn.gain.setTargetAtTime(0, at, 0.15); s.stop(at + 0.8); } catch (_) {} } };
+    return { dur, gain: gn, stop(at) { try { gn.gain.cancelScheduledValues(at); gn.gain.setTargetAtTime(0, at, 0.25); s.stop(at + 1.5); } catch (_) {} } };
   },
   /* Петля: файл или процедурная версия */
   loop(name, dest, vol, proc) {
@@ -2313,18 +2506,42 @@ const Sound = {
   },
   setAmbience(v) { state.ambience = v; this.applyVent(); },
   /* форточка: улица и события тише/громче, тон комнаты не меняется */
-  applyVent() {
+  applyVent(tc = 0.25) {
     if (!this.amb) return;
-    const t = this.ctx.currentTime;
-    this.amb.gain.setTargetAtTime(state.ambience * state.vent, t, 0.25);
+    const t = this.ctx.currentTime, a = state.vent;
+    this.amb.gain.setTargetAtTime(state.ambience, t, 0.25);
     if (this.inside) this.inside.gain.setTargetAtTime(state.ambience * 0.5, t, 0.25);
-    if (this.street) this.street.frequency.setTargetAtTime(1800 + 9000 * state.vent, t, 0.25);
+    const dests = [this.amb, this.events, ...Object.values(this.buses)];
+    for (const d of dests) if (d && d._win) {
+      d._win.open.gain.setTargetAtTime(this.openK(a), t, tc);
+      d._win.closed.gain.setTargetAtTime(this.closedK(a), t, tc);
+    }
+    // закрыто — больше комнаты в звуке улицы; капли по стеклу глуше, но не пропадают
+    this.roomSend.gain.setTargetAtTime(0.08 + 0.22 * (1 - a), t, tc);
+    this.paneLP.frequency.setTargetAtTime(3800 + 16000 * a * a, t, tc);
+    this.paneG.gain.setTargetAtTime(0.55 + 0.45 * a, t, tc);
   },
-  ventClick() {
+  /* створка окна: закрыть — глухой удар рамы, дребезг стекла, поворот шпингалета;
+     открыть — щелчок ручки и сухой скрип дерева */
+  ventClick(closing) {
     if (!this.started) return;
-    const t = this.ctx.currentTime + 0.01;
-    this.burst(t, { dur: 0.05, vol: 0.12, type: 'lowpass', f: 700, pan: 0.6 });
-    this.burst(t + 0.03, { dur: 0.02, vol: 0.14, f: 1800, q: 2, pan: 0.6 });
+    const t = this.ctx.currentTime + 0.01, out = this.spotNode(this.sfx, 'window', 0.2);
+    const play = (buf, at, vol, rate = 1) => { const s = this.ctx.createBufferSource(); s.buffer = buf; s.playbackRate.value = rate; const g = this.g(vol); s.connect(g).connect(out); s.start(at); s.onended = () => g.disconnect(); };
+    if (closing) {
+      play(this.baked('frame-thud', 0.5, (d, sr) => {
+        for (let i = 0; i < d.length; i++) { const tt = i / sr; d[i] = Math.exp(-tt / 0.05) * (Math.sin(2 * Math.PI * 92 * tt) * 0.8 + Math.sin(2 * Math.PI * 171 * tt + 1) * 0.5 + Math.sin(2 * Math.PI * 263 * tt) * 0.25) + (Math.random() * 2 - 1) * Math.exp(-tt / 0.006) * 0.8; }
+        for (let i = 0; i < d.length; i++) { const tt = i / sr; d[i] += 0.12 * Math.exp(-tt / 0.09) * Math.sin(2 * Math.PI * 1830 * tt) * (0.6 + 0.4 * Math.sin(2 * Math.PI * 23 * tt)); }   // стекло в раме дребезжит
+      }), t, 0.55);
+      play(this.toggleBuf(2), t + 0.32, 0.35, 0.8);
+      play(this.toggleBuf(3), t + 0.4, 0.25, 0.7);
+    } else {
+      play(this.toggleBuf(1), t, 0.35, 0.8);
+      play(this.baked('frame-creak', 0.5, (d, sr) => {
+        let ph = 0;
+        for (let i = 0; i < d.length; i++) { const tt = i / sr, f = 380 + 140 * Math.sin(tt * 9) + 60 * Math.sin(tt * 31); ph += 2 * Math.PI * f / sr;
+          const stick = 0.5 + 0.5 * Math.sign(Math.sin(2 * Math.PI * 47 * tt)); d[i] = Math.sin(ph) * stick * Math.sin(Math.PI * tt / 0.5) * 0.6 + (Math.random() * 2 - 1) * 0.05 * stick; }
+      }), t + 0.12, 0.18);
+    }
   },
   setTvVolume(v) {
     state.tvVolume = v;
@@ -2393,22 +2610,8 @@ const Sound = {
         return { stop: () => cr.forEach(c => c.stop()) };
       }));
       h.push(this.every(70, 160, t => this.train(t, bus)));
-    } else if (key === 'drizzle') {
-      h.push(this.loop('rain-light', bus, 0.8, () => {
-        const a = this.noiseBed(bus, 'pink', 'bandpass', 2600, 0.055, 0.55, 0.5);
-        const b = this.noiseBed(bus, 'brown', 'lowpass', 500, 0.05, 0.4);
-        const drips = this.every(0.12, 0.6, t => this.drip(t, bus, 0.5));
-        return { stop: at => { a.stop(at); b.stop(at); drips.stop(); } };
-      }));
-    } else if (key === 'downpour') {
-      h.push(this.loop('rain-heavy', bus, 0.9, () => {
-        const a = this.noiseBed(bus, 'white', 'lowpass', 5200, 0.09, 0.5);
-        const b = this.noiseBed(bus, 'pink', 'bandpass', 1400, 0.11, 0.6, 0.6);
-        const c = this.noiseBed(bus, 'brown', 'lowpass', 280, 0.12, 0.3);
-        const drips = this.every(0.03, 0.14, t => this.drip(t, bus, 1));
-        const gutter = this.gutter(bus);
-        return { stop: at => { a.stop(at); b.stop(at); c.stop(at); drips.stop(); gutter.stop(at); } };
-      }));
+    } else if (key === 'drizzle' || key === 'downpour') {
+      h.push(this.rain(key === 'downpour', bus));
     }
     this.groups[key] = h;
   },
@@ -2429,6 +2632,38 @@ const Sound = {
     this._grpT = setTimeout(() => { for (const k of Object.keys(this.groups)) if (k !== this.groupKey()) this.stopGroup(k); }, CFG.crossfadeMs + 300);
   },
 
+  /* Дождь по слоям, как в играх: дальняя «стена» воды во дворе, крона дерева, лужи под окном,
+     водосточная труба на фасаде — всё снаружи, через модель окна; капли по жестяному отливу
+     и по стеклу — у самого окна, слышны и при закрытой створке. Пока файлы грузятся —
+     процедурная подмена. */
+  rain(heavy, bus) {
+    const F = this.files, need = heavy ? ['rain-wash-heavy', 'rain-sill-heavy'] : ['rain-wash-light', 'rain-sill-light'];
+    const t = this.ctx.currentTime + 0.05, L = [];
+    if (need.every(n => F[n])) {
+      const M = heavy
+        ? { 'rain-wash-heavy': [1.0, [-0.35, 1]], 'rain-leaves': [0.75, [0.15, 0.85]], 'rain-puddles': [0.55, 0.45], 'rain-gutter': [0.85, 1], 'rain-sill-heavy': [1.0, 0.1, 'pane'], 'rain-glass': [0.75, -0.6, 'pane'] }
+        : { 'rain-wash-light': [0.95, [-0.35, 1]], 'rain-leaves': [0.42, [0.15, 0.85]], 'rain-puddles': [0.3, 0.45], 'rain-gutter': [0.22, 1], 'rain-sill-light': [1.0, 0.1, 'pane'], 'rain-glass': [0.32, -0.6, 'pane'] };
+      for (const [name, [vol, pan, to]] of Object.entries(M)) {
+        if (!F[name]) continue;
+        const f = this.playFile(name, t, to === 'pane' ? this.pane : bus, { vol: vol * (CFG.audio.rainVolume ?? 1), loop: true, pan, norm: false, fadeIn: 2.5 });
+        if (f) { L.push(f); if (name === 'rain-glass') this._glassG = { g: f.gain, k: vol }; }
+      }
+      // редкая машина по мокрой дороге
+      const cars = this.every(heavy ? 35 : 45, heavy ? 80 : 110, at => this.carWet(at));
+      return { stop: at => { L.forEach(x => x.stop(at)); cars.stop(); this._glassG = null; } };
+    }
+    // запасной вариант без файлов
+    const a = this.noiseBed(bus, heavy ? 'white' : 'pink', heavy ? 'lowpass' : 'bandpass', heavy ? 5200 : 2600, heavy ? 0.09 : 0.055, 0.5, 0.5);
+    const b = this.noiseBed(bus, 'brown', 'lowpass', heavy ? 280 : 500, heavy ? 0.12 : 0.05, 0.4);
+    const drips = this.every(heavy ? 0.03 : 0.12, heavy ? 0.14 : 0.6, at => this.drip(at, bus, heavy ? 1 : 0.5));
+    return { stop: at => { a.stop(at); b.stop(at); drips.stop(); } };
+  },
+  /* машина по мокрому асфальту за домом: шипение шин и всплески луж */
+  carWet(t) {
+    if (state.weather === 'clear') return 0;
+    const f = this.playFile('car-wet', t ?? this.ctx.currentTime + 0.05, this.events, { vol: rand(0.5, 0.8), pan: Math.random() < 0.5 ? [-0.2, 0.6] : [0.6, 1], norm: false });
+    return f ? f.dur : 0;
+  },
   /* ветер в окне: гул + шелест листвы, громкость — от силы порыва */
   makeWind() {
     const n = this.noise('pink'), bp = this.f('bandpass', 500, 0.8), g1 = this.g(0);
@@ -2443,6 +2678,7 @@ const Sound = {
     W.g1.gain.setTargetAtTime((0.008 + 0.075 * Math.pow(w, 1.6)) * k, t, 0.12);
     W.g2.gain.setTargetAtTime((0.002 + 0.05 * w * w) * k * (state.weather === 'clear' ? 1 : 0.6), t, 0.12);
     W.bp.frequency.setTargetAtTime(380 + 900 * w, t, 0.2);
+    if (this._glassG) this._glassG.g.gain.setTargetAtTime(this._glassG.k * (CFG.audio.rainVolume ?? 1) * (0.45 + 1.1 * w), t, 0.3);   // косой дождь бьёт в стекло на порывах
   },
   /* стрижи на закате: стайка визжит и проносится мимо окна */
   swifts(t, bus) {
@@ -2451,13 +2687,13 @@ const Sound = {
       const tt = t + i * rand(0.05, 0.25), dur = rand(0.35, 0.7);
       const o = this.o('sawtooth', 6200), fm = this.o('sine', rand(28, 40)), fg = this.g(rand(600, 900));
       fm.connect(fg).connect(o.frequency);
-      const bp = this.f('bandpass', 6800, 3), gn = this.g(0), pn = this.p(-dir, 'street');
-      o.connect(bp).connect(gn).connect(pn).connect(bus);
+      const bp = this.f('bandpass', 6800, 3), gn = this.g(0), em = this.outdoorEmitter(bus, -dir, false), pn = em.panner;
+      o.connect(bp).connect(gn).connect(em);
       if (pn.pan) { pn.pan.setValueAtTime(clamp(-dir * 0.8 + 0.2, -1, 1), tt); pn.pan.linearRampToValueAtTime(clamp(dir * 0.8 + 0.2, -1, 1), tt + dur); }
       o.frequency.setValueAtTime(rand(5800, 6600), tt); o.frequency.linearRampToValueAtTime(rand(7000, 7800), tt + dur * 0.4); o.frequency.linearRampToValueAtTime(rand(6000, 6600), tt + dur);
       gn.gain.setValueAtTime(0, tt); gn.gain.linearRampToValueAtTime(rand(0.006, 0.014), tt + 0.05); gn.gain.linearRampToValueAtTime(0, tt + dur);
       o.start(tt); fm.start(tt); o.stop(tt + dur + 0.05); fm.stop(tt + dur + 0.05);
-      o.onended = () => pn.disconnect();
+      o.onended = () => { em.disconnect(); pn.disconnect(); };
     }
   },
   /* капли по жестяному отливу за окном */
@@ -2491,20 +2727,20 @@ const Sound = {
   thunder(delay) {
     if (!this.started) return;
     const t = this.ctx.currentTime + delay;
-    if (this.playFile('thunder', t, this.amb, { vol: 0.9, pan: 0.4 })) return;
+    // чем больше пауза после вспышки, тем дальше гроза: ближний — с треском, дальний — один раскат
+    const name = delay < 1.4 ? 'thunder-1' : delay < 2.8 ? 'thunder-2' : 'thunder-3';
+    if (this.files[name]) { this.playFile(name, t, this.events, { vol: 1.1, pan: [-0.2, 0.9], norm: false }); return; }
     const dur = rand(5, 8);
     const n = this.noise('brown', false), lp = this.f('lowpass', 260), gn = this.g(0);
-    n.connect(lp).connect(gn); this.out(gn, this.amb, 0.3); gn.connect(this.verb);
+    n.connect(lp).connect(gn); this.out(gn, this.events, 0.3);
     gn.gain.setValueAtTime(0, t); gn.gain.linearRampToValueAtTime(0.9, t + 0.25 + delay * 0.1);
     for (let k = 1; k < 5; k++) gn.gain.linearRampToValueAtTime(rand(0.35, 0.8) * (1 - k / 6), t + k * dur / 6);
     gn.gain.linearRampToValueAtTime(0, t + dur);
     n.loop = true; n.start(t, Math.random() * 3); n.stop(t + dur + 0.1);
-    if (delay < 1.5) this.burst(t, { dur: 0.35, vol: 0.25, type: 'lowpass', f: 1800, dest: this.amb, pan: 0.4 });
   },
-
   bird(t, bus) {
     const pan = rand(0.15, 1), base = rand(2600, 4900), vol = rand(0.018, 0.045), k = Math.random();
-    const hp = this.f('highpass', 1600), gn = this.g(1); hp.connect(gn); this.out(gn, bus, pan); gn.connect(this.verb);
+    const hp = this.f('highpass', 1600), gn = this.g(1); hp.connect(gn); this.out(gn, bus, pan);
     if (k < 0.4) { const n = irand(2, 5); for (let i = 0; i < n; i++) this.tone(t + i * rand(0.09, 0.16), { f: base * rand(0.95, 1.1), f2: base * rand(0.6, 0.8), dur: rand(0.05, 0.09), vol, dest: hp }); }
     else if (k < 0.72) { const n = irand(6, 13); for (let i = 0; i < n; i++) this.tone(t + i * 0.047, { f: base, f2: base * 1.16, dur: 0.035, vol: vol * 0.8, dest: hp }); }
     else { this.tone(t, { f: base * 0.7, f2: base * 0.92, dur: 0.22, vol, attack: 0.02, dest: hp }); this.tone(t + 0.29, { f: base * 0.92, f2: base * 0.64, dur: 0.26, vol, attack: 0.02, dest: hp }); }
@@ -2513,7 +2749,7 @@ const Sound = {
   child(t, bus) {
     const ctx = this.ctx, pan = rand(0.3, 0.95);
     const lp = this.f('lowpass', 1700), gn = this.g(rand(0.012, 0.026));
-    lp.connect(gn); this.out(gn, bus, pan); gn.connect(this.verb);
+    lp.connect(gn); this.out(gn, bus, pan);
     const laugh = Math.random() < 0.3;
     const syl = laugh ? irand(4, 6) : irand(1, 3);
     let tt = t;
@@ -2578,15 +2814,6 @@ const Sound = {
     return b;
   },
   /* «Из другой комнаты»: срез верхов двумя фильтрами, тёплая середина, короткое эхо кухни */
-  throughWall(pan = -0.55, cutoff = 1700, dest = this.events) {
-    this.kitchenVerb();
-    const inp = this.g(1), hp = this.f('highpass', 140), w1 = this.f('lowpass', cutoff, 0.6), w2 = this.f('lowpass', cutoff * 1.4, 0.5), body = this.f('peaking', 380, 0.9);
-    body.gain.value = 4;
-    inp.connect(hp).connect(w1).connect(w2).connect(body);
-    body.connect(this.spotNode(dest, 'kitchen', pan));
-    const room = this.g(0.55); body.connect(room).connect(this.kitchenVerb());
-    return { inp, done: () => { inp.disconnect(); body.disconnect(); room.disconnect(); } };
-  },
   /* эхо кухни — одно на всё, подключается один раз */
   kitchenVerb() {
     if (!this._kitchen) {
@@ -2595,11 +2822,11 @@ const Sound = {
     }
     return this._kitchen;
   },
+  /* яичница на кухне: запись, «пропущенная» через кафельную кухню, дверной проём и коридор
+     (обработка заранее); здесь — место за спиной слева и отзвук нашей комнаты */
   frying(t) {
     if (this.files.frying) {
-      const W = this.throughWall(-0.55, CFG.audio.kitchenCutoff || 1700, this.home);
-      const f = this.playFile('frying', t, W.inp, { vol: CFG.audio.fryingVolume ?? 0.3, maxDur: rand(15, 20), fadeOut: 3 });
-      setTimeout(W.done, (f.dur + 2) * 1000);
+      const f = this.playFile('frying', t, this.home, { vol: CFG.audio.fryingVolume ?? 0.55, pan: -0.55, norm: false, maxDur: rand(18, 26), fadeOut: 4, offset: 0 });
       return f.dur;
     }
     if (!this._crackle) this._crackle = this.makeCrackle();
@@ -2642,11 +2869,11 @@ const Sound = {
   siren(t) {
     const sb = this.fileBuf('siren'), fileT = sb ? sb.duration : null;
     const T = fileT || 11;
-    const pn = this.p(-1, 'street');
+    const em = this.outdoorEmitter(this.events, -1, true, this.panner('street', -1)), pn = em.panner;
     if (pn.positionX) { this.setPos(pn, 3, -4, -40, t); this.rampPos(pn, [8, -4, 2], t + T * 0.5); this.rampPos(pn, [14, -4, 40], t + T); pn.refDistance = 9; }
     else if (pn.pan) { pn.pan.setValueAtTime(-1, t); pn.pan.linearRampToValueAtTime(1, t + T); }
-    const glass = this.f('lowpass', 3800);
-    glass.connect(pn).connect(this.events); glass.connect(this.verb);
+    const glass = this.f('lowpass', 5200);
+    glass.connect(em);
     const N = 256, prox = new Float32Array(N), dop = new Float32Array(N);
     for (let i = 0; i < N; i++) { const x = i / (N - 1); prox[i] = 0.015 + 0.6 * Math.exp(-Math.pow((x - 0.5) / 0.2, 2)); dop[i] = 115 * Math.tanh(-(x - 0.5) / 0.07); }
     const pg = this.g(0); pg.connect(glass);
@@ -2670,7 +2897,7 @@ const Sound = {
       const ti = this.noise('pink'), tbp = this.f('bandpass', 900, 0.6), tg = this.g(0.3);
       ti.connect(tbp).connect(tg).connect(pg); ti.start(t, Math.random() * 3); ti.stop(t + T + 0.1);
     }
-    setTimeout(() => { pg.disconnect(); glass.disconnect(); }, (T + 1) * 1000);
+    setTimeout(() => { pg.disconnect(); glass.disconnect(); em.disconnect(); pn.disconnect(); }, (T + 3) * 1000);
     return T;
   },
   clock(t) {
@@ -2694,42 +2921,28 @@ const Sound = {
     setTimeout(() => gn.disconnect(), 6000);
     return 3.5;
   },
+  /* собака во дворе: живая запись, «отнесённая» на 45…110 м (воздух, угол дома, отражения
+     от фасадов) — здесь ей задаётся место во дворе, дальше работают окно и отзвук двора */
   dog(t) {
-    const f = this.playFile('dog', t, this.events, { vol: 0.8, pan: 0.7 }); if (f) return f.dur;
-    const lp = this.f('lowpass', 2300), gn = this.g(1), f1 = this.f('bandpass', 780, 1.4), f2 = this.f('bandpass', 1550, 2);
-    f1.connect(lp); f2.connect(lp); lp.connect(gn); this.out(gn, this.events, 0.72); gn.connect(this.verb);
-    let tt = t;
-    for (let s = 0; s < 2; s++) {
-      for (let b = 0, n = irand(2, 4); b < n; b++) {
-        const env = this.g(0); env.connect(f1); env.connect(f2);
-        const o = this.o('sawtooth', 560); o.frequency.setValueAtTime(rand(520, 600), tt); o.frequency.exponentialRampToValueAtTime(rand(300, 360), tt + 0.14);
-        o.connect(env); o.start(tt); o.stop(tt + 0.2);
-        env.gain.setValueAtTime(0, tt); env.gain.linearRampToValueAtTime(0.3, tt + 0.012); env.gain.exponentialRampToValueAtTime(0.001, tt + 0.17);
-        this.burst(tt, { dur: 0.12, vol: 0.12, f: 1100, q: 0.8, dest: f1 });
-        tt += rand(0.32, 0.55);
-      }
-      tt += rand(1.1, 1.8);
-    }
-    setTimeout(() => gn.disconnect(), (tt - t + 4) * 1000);
-    return tt - t;
+    const f = this.playFile('dog', t, this.events, { vol: CFG.audio.dogVolume ?? 0.7, pan: rand(0.1, 0.9), norm: false }); if (f) return f.dur;
+    return this.dogSynth(t, 0.7);
   },
-  /* собака далеко во дворе: тише, глуше, с эхом от соседних домов */
   dogFar(t) {
-    const f = this.playFile('dog-far', t, this.events, { vol: 0.35, pan: 0.85 }); if (f) return f.dur;
-    const lp = this.f('lowpass', 1100), gn = this.g(0.55), f1 = this.f('bandpass', 700, 1.4), f2 = this.f('bandpass', 1300, 2);
-    const echo = this.ctx.createDelay(1); echo.delayTime.value = rand(0.24, 0.34);
-    const fb = this.g(0.28), eg = this.g(0.45);
-    f1.connect(lp); f2.connect(lp); lp.connect(gn); this.out(gn, this.events, rand(0.6, 0.95)); gn.connect(this.verb);
-    gn.connect(echo); echo.connect(fb).connect(echo); echo.connect(eg); this.out(eg, this.events, -0.2);
+    const f = this.playFile('dog-far', t, this.events, { vol: (CFG.audio.dogVolume ?? 0.7) * 0.7, pan: Math.random() < 0.5 ? rand(-0.4, 0) : rand(0.85, 1), norm: false }); if (f) return f.dur;
+    return this.dogSynth(t, 0.9);
+  },
+  dogSynth(t, pan) {
+    const lp = this.f('lowpass', 1600), gn = this.g(0.6), f1 = this.f('bandpass', 760, 1.4), f2 = this.f('bandpass', 1450, 2);
+    f1.connect(lp); f2.connect(lp); lp.connect(gn); this.out(gn, this.events, pan);
     let tt = t;
-    for (let b = 0, n = irand(3, 6); b < n; b++) {
+    for (let b = 0, n = irand(3, 5); b < n; b++) {
       const env = this.g(0); env.connect(f1); env.connect(f2);
-      const o = this.o('sawtooth', 480); o.frequency.setValueAtTime(rand(460, 540), tt); o.frequency.exponentialRampToValueAtTime(rand(280, 330), tt + 0.15);
+      const o = this.o('sawtooth', 520); o.frequency.setValueAtTime(rand(500, 580), tt); o.frequency.exponentialRampToValueAtTime(rand(290, 340), tt + 0.15);
       o.connect(env); o.start(tt); o.stop(tt + 0.22);
-      env.gain.setValueAtTime(0, tt); env.gain.linearRampToValueAtTime(0.16, tt + 0.015); env.gain.exponentialRampToValueAtTime(0.001, tt + 0.18);
-      tt += rand(0.45, 0.8);
+      env.gain.setValueAtTime(0, tt); env.gain.linearRampToValueAtTime(0.22, tt + 0.014); env.gain.exponentialRampToValueAtTime(0.001, tt + 0.18);
+      tt += rand(0.4, 0.75);
     }
-    setTimeout(() => { gn.disconnect(); eg.disconnect(); fb.disconnect(); }, (tt - t + 5) * 1000);
+    setTimeout(() => gn.disconnect(), (tt - t + 5) * 1000);
     return tt - t;
   },
 
@@ -2986,7 +3199,7 @@ const Sound = {
     },
     /* олень: тихий звон хрусталя — несколько бокалов задели друг друга */
     'egg-deer'(t, d, pan) {
-      const gn = this.g(1); this.out(gn, d, pan); gn.connect(this.verb);
+      const gn = this.g(1); this.out(gn, d, pan); gn.connect(this.roomVerb);
       [[0, 2637, 0.05], [0.09, 3520, 0.035], [0.22, 2960, 0.03]].forEach(([dt, f, v]) => {
         for (const [m, a, dur] of [[1, 1, 1.6], [2.76, 0.35, 0.7], [5.4, 0.12, 0.35]]) this.tone(t + dt, { f: f * m * rand(0.997, 1.003), dur, vol: v * a, attack: 0.001, dest: gn });
       });
@@ -2995,7 +3208,7 @@ const Sound = {
     'egg-figurine'(t, d, pan) {
       const notes = [84, 88, 91, 88, 86, 84, 83, 86, 89, 86, 84, 79, 84];
       let tt = t, gap = 0.3;
-      const gn = this.g(1); this.out(gn, d, pan); gn.connect(this.verb);
+      const gn = this.g(1); this.out(gn, d, pan); gn.connect(this.roomVerb);
       notes.forEach((n, i) => {
         const f = midi(n);
         this.tone(tt, { f, dur: 1.4, vol: 0.07, attack: 0.002, dest: gn });
@@ -3052,7 +3265,7 @@ const Events = {
     let id;
     if (urgent.length && urgent[0].slack < E.maxIntervalSec) id = urgent[0].m;
     else {
-      const pool = Object.entries(E.weights).filter(([k]) => k !== this.last && Sound[k]);
+      const pool = Object.entries(E.weights).filter(([k]) => k !== this.last && Sound[k] && (k !== 'carWet' || state.weather !== 'clear'));
       let r = Math.random() * pool.reduce((s, [, w]) => s + w, 0);
       for (const [k, w] of pool) { r -= w; if (r <= 0) { id = k; break; } }
       id = id || pool[0][0];
@@ -3076,16 +3289,18 @@ const Events = {
 /* Форточка — регулятор уличного шума, спрятанный в интерьере */
 const Vent = {
   index() { const L = CFG.audio.windowLevels; let best = 0; L.forEach((v, i) => { if (Math.abs(v - state.vent) < Math.abs(L[best] - state.vent)) best = i; }); return best; },
-  set(v, quiet) {
+  set(v, quiet, tc) {
     state.vent = clamp(Math.round(v * 100) / 100, 0, 1);
-    try { localStorage.setItem('tubetv.vent', String(state.vent)); } catch (_) {}
-    Sound.applyVent();
+    try { localStorage.setItem('tubetv.window', String(state.vent)); } catch (_) {}
+    Sound.applyVent(tc);
     Zones.refreshLabels();
     if (!quiet) UI.toast(T.drapeNow[this.index()], 2200);
   },
   cycle() {
-    const L = CFG.audio.windowLevels, i = (this.index() + 1) % L.length;
-    Sound.ventClick(); this.set(L[i]);
+    const L = CFG.audio.windowLevels, i = (this.index() + 1) % L.length, closing = L[i] < state.vent;
+    Sound.ventClick(closing);
+    // створка движется: звук улицы меняется за ~полсекунды, при закрытии — с хлопком рамы
+    setTimeout(() => this.set(L[i], false, closing ? 0.06 : 0.35), closing ? 280 : 60);
   },
 };
 
@@ -4233,7 +4448,7 @@ function init() {
   };
   requestAnimationFrame(frame);
 
-  window.TubeTV = { GLRoom, BG, TV, Sound, Events, setMode, setWeather, Calib, Puppets, Camera, Feed, Deer, Wind, Weather, state, CFG };   // для отладки из консоли
+  window.TubeTV = { GLRoom, BG, TV, Sound, Events, setMode, setWeather, Calib, Puppets, Camera, Feed, Deer, Vent, Wind, Weather, state, CFG };   // для отладки из консоли
 }
 
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();

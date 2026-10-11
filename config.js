@@ -145,15 +145,15 @@ window.TUBE_TV_CONFIG = {
      Каждое переключение на канал — следующая запись. */
   channels: [
     { type: 'archive', label: 'АРХИВ', live: true, items: [
-      { id: '90stvintros_russia_ort', file: 'Russia, ORT, openings.mp4' },                // ОРТ: заставки передач 90-х
-      { id: '80stvshows_soviet_union_ct_ussr', file: 'Soviet Union, CT USSR, openings.mp4' },   // ЦТ СССР: заставки 80-х
-      { id: 'Vremya_24.02.89' },                                                            // «Время», 24 февраля 1989
-      { id: '90stvshows_russia_tv6', file: 'Russia, TV-6, openings.mp4' },                 // ТВ-6: заставки
+      { id: '90stvintros_russia_ort', file: 'Russia, ORT, openings.mp4' },                     // ОРТ: заставки передач 90-х
+      { id: '80stvshows_soviet_union_ct_ussr', file: 'Soviet Union, CT USSR, openings.mp4' },  // ЦТ СССР: заставки 80-х
+      { id: 'Vremya_24.02.89' },                                                               // программа «Время», 24 февраля 1989
+      { id: '90stvshows_russia_tv6', file: 'Russia, TV-6, openings.mp4' },                    // ТВ-6: заставки
     ] },
+    /* match — какие ролики брать из записи (по имени файла) */
     { type: 'archive', label: 'СТАРОЕ ВИДЕО', live: true, items: [
-      { id: 'ssr_vhs_1994' },                 // «Сам себе режиссёр. Избранное» (1994), запись с VHS
-      { id: 'NuPogody' },                     // «Ну, погоди!»
-      { id: 'soviet-animation' },             // советская анимация
+      { id: 'ssr_vhs_1994' },                                                                  // «Сам себе режиссёр», кассета 1995 года
+      { id: 'soviet-animation', match: 'Перевал|Возвращение|Когда|Ванюша|Человек|Лысой|Тачанка|Машинк' },   // советская анимация
     ] },
     { type: 'rutube', label: 'РЕКЛАМА', live: true, items: [
       '67ccb76315bd7012931c88b37927b0d2', 'f2ab607427ef7a1edce1419890911ddc', '10d1b6de46324f71b6ce078fdf3ffefb',
@@ -162,7 +162,7 @@ window.TUBE_TV_CONFIG = {
     { type: 'rutube', label: 'ТВ СССР', live: true, items: [
       'b93247023f3b7d3f5ed96b3386d98c30', 'd987dbd73d9b1b1c346cc787fc651292', '73b59f96cedb1e12b39f1b5afc4be164',
       'd02c28972a264df1bc4725478bbf8635', 'f37aa7952686316042d76aa383dd77d2', '5538298c21b7c3f993c3b94a3e8553a2',
-      'd3e49d694acdfc8548a7d290d08509fe', '63ae4d89e52c64a677d5b15a67b36824',
+      'd3e49d694acdfc8548a7d290d08509fe',
     ] },
     { type: 'morning',  label: 'УТРО',
       title: ['С ДОБРЫМ', 'УТРОМ!'],
@@ -196,32 +196,44 @@ window.TUBE_TV_CONFIG = {
   /* ---------- ЗВУК ---------- */
   audio: {
     master: 0.9,
-    ambienceVolume: 0.45,
-    fryingVolume: 0.3,       // яичница на кухне    // общий уровень фона (комната, улица, события) — множитель
-    /* Форточка (клик по тяжёлой шторе слева от тюля, колёсико — плавно):
-       насколько слышна улица. Закрытая форточка ещё и гасит ветер в тюле. */
-    windowLevels: [0.12, 0.35, 0.7],   // закрыта / приоткрыта / открыта
-    windowStart: 1,                    // индекс в windowLevels при первом заходе
+    ambienceVolume: 0.45,    // общий уровень фона (комната, улица, события) — множитель
+    fryingVolume: 0.55,      // яичница на кухне
+    dogVolume: 0.7,          // собака во дворе
+    rainVolume: 1.0,         // дождь
+    /* Окно (клик по тяжёлой шторе слева от тюля, колёсико — плавно): 0 — закрыто, 1 — настежь.
+       Закрытое окно не просто «срезает верхи»: улица переезжает в плоскость стекла,
+       проходит в основном низ, растёт доля отзвука комнаты; капли по стеклу и отливу остаются. */
+    windowLevels: [0, 0.3, 1],         // закрыто / приоткрыто / открыто
+    windowStart: 2,                    // индекс в windowLevels при первом заходе
     sfxVolume: 0.8,          // щелчки, пасхалки
     headphones: true,        // объёмный звук (HRTF) по умолчанию; кнопка с наушниками переключает
     soundsFolder: 'sounds/',
-    kitchenCutoff: 1700,     // «стена» для яичницы: чем ниже, тем глуше (Гц)
     autoDetectFiles: false,  // true — искать sounds/<имя>.mp3 для всех имён ниже автоматически
-    /* Подмена процедурного звука файлом: впишите путь вместо null.
+    /* Подмена процедурного звука файлом: впишите путь вместо null (массив — случайный вариант).
        Петли (фон, каналы) зациклятся сами, события проиграются один раз. */
     files: {
       'room-tone': null,      'street-day': null,  'birds': null,       'children': null,
       'street-evening': null, 'crickets': null,
-      'frying': ['sounds/frying-1.mp3', 'sounds/frying-2.mp3'],   // массив — случайный вариант; звучит «через стену»
-      'siren': null,          'clock': null,       'door': null,      'dog': null,      'dog-far': null,
-      'thunder': null,        'rain-light': null,  'rain-heavy': null,
+      'frying': ['sounds/kitchen-fry-1.mp3', 'sounds/kitchen-fry-2.mp3'],
+      'siren': null,          'clock': null,       'door': null,
+      'dog': ['sounds/dog-1.mp3', 'sounds/dog-3.mp3', 'sounds/dog-5.mp3', 'sounds/dog-7.mp3'],
+      'dog-far': ['sounds/dog-2.mp3', 'sounds/dog-4.mp3', 'sounds/dog-6.mp3', 'sounds/dog-8.mp3'],
+      'thunder-1': 'sounds/thunder-1.mp3', 'thunder-2': 'sounds/thunder-2.mp3', 'thunder-3': 'sounds/thunder-3.mp3',
+      'car-wet': ['sounds/car-wet-1.mp3', 'sounds/car-wet-2.mp3'],
+      'rain-wash-light': 'sounds/rain/rain-wash-light.mp3', 'rain-wash-heavy': 'sounds/rain/rain-wash-heavy.mp3',
+      'rain-leaves': 'sounds/rain/rain-leaves.mp3', 'rain-puddles': 'sounds/rain/rain-puddles.mp3',
+      'rain-gutter': 'sounds/rain/rain-gutter.mp3', 'rain-glass': 'sounds/rain/rain-glass.mp3',
+      'rain-sill-light': 'sounds/rain/rain-sill-light.mp3', 'rain-sill-heavy': 'sounds/rain/rain-sill-heavy.mp3',
       'street-sunset': null,  'swifts': null,      'window-latch': null,
       'tv-on': null,          'tv-off': null,      'channel-click': null,
       'tv-testcard': null,    'tv-static': null,   'tv-morning': null,
       'lamp-click': null,
-      'egg-sachet': null,     'egg-tamagotchi': null, 'egg-brickgame': null, 'egg-rubik': null,
+      'egg-tamagotchi': null, 'egg-brickgame': null, 'egg-rubik': null,
       'egg-bear': null,       'egg-cassette': null,   'egg-figurine': null,  'egg-teapot': null,
     },
+    /* бесшовные петли: файл записан с запасом в 1 с по краям, период — в секундах */
+    seamless: { 'rain-wash-light': 24, 'rain-wash-heavy': 24, 'rain-leaves': 24, 'rain-puddles': 24,
+                'rain-gutter': 24, 'rain-glass': 24, 'rain-sill-light': 24, 'rain-sill-heavy': 24 },
   },
 
   /* ---------- ВЕТЕР И ПОГОДА ---------- */
@@ -243,7 +255,7 @@ window.TUBE_TV_CONFIG = {
     maxIntervalSec: 120,
     firstDelaySec: [25, 45],
     mustHappen: { frying: 170, siren: 300 },   // событие: не реже, чем раз в N секунд
-    weights: { frying: 3, siren: 1.6, clock: 1, door: 1, dog: 0.6, dogFar: 1.4 },
+    weights: { frying: 3, siren: 1.6, clock: 1, door: 1, dog: 1.0, dogFar: 1.4, carWet: 1.2 },
   },
 
   /* ---------- ПАСХАЛКИ ----------
@@ -285,8 +297,10 @@ window.TUBE_TV_CONFIG = {
     lamp: { day: 'Торшер — вернуть день', sunset: 'Торшер — дождаться заката', evening: 'Торшер — дождаться вечера', night: 'Торшер — погасить: пусть светит только телевизор' },
     weatherNext: { clear: 'Окно — пусть распогодится', drizzle: 'Окно — пусть моросит', downpour: 'Окно — пусть хлынет ливень' },
     weatherNow: { clear: 'Распогодилось', drizzle: 'Пасмурно, моросит', downpour: 'Ливень' },
-    drape: ['Форточка закрыта — открыть чуть-чуть', 'Форточка приоткрыта — открыть настежь', 'Форточка открыта — закрыть'],
-    drapeNow: ['Форточку закрыли — тихо', 'Форточку приоткрыли', 'Форточку открыли настежь'],
+    drape: ['Окно закрыто — приоткрыть', 'Окно приоткрыто — открыть настежь', 'Окно открыто — закрыть'],
+    drapeNow: ['Окно закрыли — улица стала глуше, слышно только стекло', 'Окно приоткрыли', 'Окно открыли настежь'],
+    rainHint: 'Пошёл дождь. Окно можно закрыть — щёлкните по шторе слева от тюля',
+    tapForSound: 'Браузер запустил эфир без звука — нажмите на экран телевизора',
     rtxOn: 'RTX включён: блики и преломления в хрустале',
     rtxOff: 'RTX выключен',
     phonesOn: 'Объёмный звук для наушников включён',

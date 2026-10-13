@@ -61,7 +61,12 @@ html, body {
 .room-gl.on { opacity: 1; }
 #bg.gl .bg-layer { visibility: hidden; }
 /* крупный план: проявляется, когда камера уже почти «села» */
-.close-wrap { position: absolute; pointer-events: none; opacity: 0; transition: opacity .35s ease; }
+.close-wrap { position: absolute; pointer-events: none; opacity: 0; transition: opacity .35s ease;
+  /* края крупного плана растворяются в комнате — на узких экранах он не закрывает всё, и шва не видно */
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 3%, #000 97%, transparent), linear-gradient(to bottom, transparent, #000 4%, #000 96%, transparent);
+  -webkit-mask-composite: source-in;
+          mask-image: linear-gradient(to right, transparent, #000 3%, #000 97%, transparent), linear-gradient(to bottom, transparent, #000 4%, #000 96%, transparent);
+          mask-composite: intersect; }
 body.seated .close-wrap { opacity: 1; transition: opacity .9s ease .6s; }
 .close-wrap img { position: absolute; inset: 0; width: 100%; height: 100%; display: block; opacity: 0; transition: opacity var(--xfade, 2600ms) ease; }
 .close-wrap img.on.loaded { opacity: 1; }
@@ -544,3 +549,142 @@ body.reduced .grain { display: none; }
 .boot.done { opacity: 0; pointer-events: none; }
 @keyframes bootLine { 0% { transform: scaleX(0); opacity: 1; } 45% { transform: scaleX(1) scaleY(1); opacity: 1; } 100% { transform: scaleX(1) scaleY(400); opacity: 0; } }
 body.reduced .boot.done .boot-line { animation: none; }
+
+/* ============ приставка ============ */
+.hot.sega .halo { inset: -8% -5%; }
+.hot.sega:hover .halo { opacity: .55; }
+/* рамка эмулятора — за кинескопом; кадр рисует шейдер, рамка видна только если кадр отдать нельзя */
+.tv-embed iframe.sega {
+  position: absolute; left: 50%; top: 50%; display: none;
+  width: var(--sega-w, 640px); height: var(--sega-h, 480px);
+  transform: translate(-50%, -50%) scale(var(--sega-k, .2));
+  border: 0; pointer-events: none; background: #000;
+}
+.tv-embed.sega iframe.sega { display: block; }
+.tv-embed.sega.revealed iframe.sega { filter: contrast(1.05) saturate(.9) brightness(.92); }
+.tv-embed.sega.revealed { --crt: .26; }
+
+.sega-menu {
+  position: fixed; inset: 0; z-index: 60;
+  display: grid; place-items: center; padding: 16px;
+  background: rgba(10, 6, 3, .58);
+  -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px);
+  opacity: 0; transition: opacity .2s ease;
+}
+.sega-menu.show { opacity: 1; }
+.sega-menu[hidden] { display: none; }
+.sm-box {
+  width: min(780px, 100%); max-height: calc(100% - 8px); overflow: auto;
+  padding: 18px 20px 16px; border-radius: 16px;
+  background: rgba(30, 19, 11, .94); color: var(--ink);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, .55), 0 0 0 1px rgba(255, 214, 160, .16) inset;
+  transform: translateY(8px) scale(.985); transition: transform .22s cubic-bezier(.2, .9, .3, 1);
+  -webkit-user-select: none; user-select: none;
+}
+.sega-menu.show .sm-box { transform: none; }
+.sm-head { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.sm-head b { font-size: 27px; font-weight: 400; letter-spacing: .3px; }
+.sm-pad { margin-left: auto; font-size: 14px; opacity: .6; padding: 4px 10px; border-radius: 99px; border: 1px solid rgba(255, 214, 160, .16); }
+.sm-pad.on { opacity: 1; color: #9dffb7; border-color: rgba(157, 255, 183, .35); }
+.sm-x {
+  width: 36px; height: 36px; border-radius: 50%; flex: none; cursor: pointer;
+  border: 1px solid rgba(255, 214, 160, .2); background: rgba(255, 214, 160, .06); color: var(--ink);
+  font: 24px/1 system-ui, sans-serif;
+}
+.sm-x:hover { background: rgba(255, 214, 160, .14); }
+.sm-now { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin: 0 0 14px; padding: 10px 12px; border-radius: 12px; background: rgba(255, 214, 160, .06); }
+.sm-now[hidden] { display: none; }
+.sm-now-t { flex: 1 1 200px; font-size: 18px; }
+.sm-btn {
+  font: 17px/1 "Neucha", "Comic Sans MS", system-ui, sans-serif; color: var(--ink); cursor: pointer;
+  padding: 9px 14px; border-radius: 10px; border: 1px solid rgba(255, 214, 160, .22); background: rgba(255, 214, 160, .05);
+}
+.sm-btn:hover { background: rgba(255, 214, 160, .13); }
+.sm-btn.main { background: rgba(233, 180, 106, .9); color: #2a170a; border-color: transparent; }
+.sm-btn.main:hover { background: rgba(245, 196, 126, 1); }
+.sm-carts { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+.sm-cart {
+  display: flex; flex-direction: column; align-items: stretch; gap: 3px; text-align: left; cursor: pointer;
+  padding: 10px 10px 12px; border-radius: 12px; border: 1px solid transparent; background: none; color: var(--ink);
+  font: inherit; transition: background .15s ease;
+}
+.sm-cart:hover, .sm-cart:focus-visible { background: rgba(255, 214, 160, .09); border-color: rgba(255, 214, 160, .2); outline: none; }
+.sm-cart:focus-visible { box-shadow: 0 0 0 2px rgba(255, 214, 160, .7); }
+.sm-name { font-size: 19px; line-height: 1.1; margin-top: 8px; }
+.sm-desc { font-size: 14px; line-height: 1.2; opacity: .65; }
+.sm-cart.current .cart::after { content: 'в приставке'; position: absolute; right: -6px; top: -9px; padding: 3px 8px; border-radius: 99px;
+  font-size: 13px; line-height: 1; color: #10240f; background: #9dffb7; box-shadow: 0 2px 8px rgba(0,0,0,.4); }
+/* картридж: тёмный пластик, рёбра сверху, наклейка с титульным экраном */
+.cart {
+  position: relative; display: block; aspect-ratio: 10 / 9;
+  background: linear-gradient(180deg, #2c2b30 0%, #1b1a1e 55%, #121114 100%);
+  border-radius: 12% 12% 5% 5% / 10% 10% 5% 5%;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .1), inset 0 -3px 6px rgba(0, 0, 0, .45), 0 8px 16px rgba(0, 0, 0, .45);
+  transition: transform .18s ease;
+}
+.sm-cart:hover .cart, .sm-cart:focus-visible .cart { transform: translateY(-3px); }
+.cart .c-top { position: absolute; left: 7%; right: 7%; top: 4%; height: 10%;
+  background: repeating-linear-gradient(90deg, rgba(255, 255, 255, .07) 0 2px, rgba(0, 0, 0, .25) 2px 6px); border-radius: 3px; }
+.cart .c-label { position: absolute; left: 9%; right: 9%; top: 19%; bottom: 13%;
+  background: #0a0a10 center / cover no-repeat; image-rendering: pixelated; border-radius: 3px;
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, .5), inset 0 0 0 1px rgba(255, 255, 255, .08); }
+.cart .c-grip { position: absolute; left: 30%; right: 30%; bottom: 4%; height: 5%;
+  background: repeating-linear-gradient(90deg, rgba(255, 255, 255, .08) 0 2px, transparent 2px 5px); }
+.cart.empty { background: none; box-shadow: none; border: 2px dashed rgba(255, 214, 160, .3); }
+.cart.empty .c-top, .cart.empty .c-grip { display: none; }
+.cart.empty .c-label { background: none; box-shadow: none; display: grid; place-items: center; }
+.cart.empty i { font: 400 44px/1 system-ui, sans-serif; font-style: normal; opacity: .55; }
+.sm-file { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; overflow: hidden; }
+.sm-box { position: relative; }
+.sm-keys { margin-top: 14px; padding-top: 12px; border-top: 1px solid rgba(255, 214, 160, .12); font-size: 15px; line-height: 1.7; opacity: .82; }
+.sm-keys kbd {
+  display: inline-block; min-width: 1.6em; padding: 0 .35em; margin: 0 2px; text-align: center;
+  font: 12px/1.6 ui-monospace, Menlo, monospace; color: var(--ink);
+  border-radius: 5px; border: 1px solid rgba(255, 214, 160, .3); background: rgba(255, 214, 160, .07);
+}
+@media (max-width: 680px) {
+  .sm-carts { grid-template-columns: repeat(2, 1fr); }
+  .sm-head b { font-size: 23px; }
+  .sm-pad { display: none; }
+}
+@media (pointer: coarse) and (hover: none) { .sm-keys { display: none; } }
+
+/* экранный джойстик: только на сенсорных экранах, пока идёт игра */
+.sega-pad { display: none; }
+@media (pointer: coarse) {
+  body.sega-on:not(.sega-menu-open) .sega-pad { display: block; }
+  body.sega-on .mixer, body.sega-on #ver { display: none; }
+  body.sega-on .toast { bottom: calc(max(18px, env(safe-area-inset-bottom)) + 150px); }
+}
+.sega-pad { position: fixed; inset: 0; z-index: 25; pointer-events: none; }
+.sega-pad > * { pointer-events: auto; touch-action: none; -webkit-touch-callout: none; }
+.sp-dpad {
+  position: absolute; left: max(18px, env(safe-area-inset-left)); bottom: max(22px, env(safe-area-inset-bottom));
+  width: 136px; height: 136px; border-radius: 50%;
+  background: rgba(18, 12, 8, .45); border: 1px solid rgba(255, 214, 160, .18);
+  -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px);
+}
+.sp-dpad i { position: absolute; background: rgba(255, 235, 210, .16); border-radius: 6px; transition: background .06s; }
+.sp-dpad i.u, .sp-dpad i.d { left: 37%; width: 26%; height: 34%; }
+.sp-dpad i.u { top: 9%; } .sp-dpad i.d { bottom: 9%; }
+.sp-dpad i.l, .sp-dpad i.r { top: 37%; height: 26%; width: 34%; }
+.sp-dpad i.l { left: 9%; } .sp-dpad i.r { right: 9%; }
+.sp-dpad i.on { background: rgba(255, 214, 160, .62); }
+.sp-dpad b { position: absolute; left: 37%; top: 37%; width: 26%; height: 26%; background: rgba(255, 235, 210, .1); }
+.sp-abc { position: absolute; right: max(16px, env(safe-area-inset-right)); bottom: max(26px, env(safe-area-inset-bottom)); display: flex; gap: 10px; align-items: flex-end; }
+.sp-abc button, .sp-start, .sp-menu {
+  border: 1px solid rgba(255, 214, 160, .25); color: var(--ink); cursor: pointer;
+  background: rgba(18, 12, 8, .5); -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px);
+  font: 700 17px/1 ui-monospace, Menlo, monospace;
+}
+.sp-abc button { width: 58px; height: 58px; border-radius: 50%; }
+.sp-abc button:nth-child(2) { margin-bottom: 18px; }
+.sp-abc button:nth-child(3) { margin-bottom: 36px; }
+.sp-abc button.down, .sp-start.down { background: rgba(233, 180, 106, .75); color: #2a170a; }
+.sp-start { position: absolute; left: 50%; transform: translateX(-50%); bottom: max(26px, env(safe-area-inset-bottom)); padding: 9px 16px; border-radius: 99px; font-size: 12px; letter-spacing: 1px; }
+.sp-menu { position: absolute; left: max(14px, env(safe-area-inset-left)); top: max(14px, env(safe-area-inset-top)); width: 44px; height: 44px; border-radius: 50%; font: 20px/1 system-ui, sans-serif; }
+@media (max-width: 520px) {
+  .sp-abc button { width: 54px; height: 54px; }
+  .sp-abc { gap: 8px; }
+  .sp-start { left: auto; right: max(16px, env(safe-area-inset-right)); transform: none; bottom: calc(max(26px, env(safe-area-inset-bottom)) + 112px); }
+}

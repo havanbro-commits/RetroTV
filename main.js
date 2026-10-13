@@ -143,6 +143,15 @@ const Close = {
     this.wrap.appendChild(im); this.imgs[scene] = im;
   },
   load() { for (const im of Object.values(this.imgs)) if (!im.src) im.src = im.dataset.src; },
+  /* крупный план целиком закрывает экран — комнату под ним можно не перерисовывать */
+  covers() {
+    const C = CFG.closeup, im = this.imgs[this.scene];
+    if (!C || !this.wrap || !im || !im.classList.contains('loaded')) return false;
+    const t = Camera.target(), m = this.map(), k = t.k * state.stage.w / IMG_W;
+    const w = C.size[0] * m.sx * k, h = C.size[1] * m.sy * k, x0 = t.x + m.x0 * k, y0 = t.y + m.y0 * k;
+    // края растворены маской (3–4 %) — комната должна быть закрыта сплошной частью
+    return x0 + w * 0.03 <= 0 && y0 + h * 0.04 <= 0 && x0 + w * 0.97 >= innerWidth && y0 + h * 0.96 >= innerHeight;
+  },
   show(scene) {
     this.scene = scene;
     for (const [s, im] of Object.entries(this.imgs)) im.classList.toggle('on', s === scene);
@@ -799,6 +808,9 @@ void main(){
 
   render(t) {
     if (!this.ok) return;
+    // сидим перед телевизором, а крупный план закрывает всё — комната не видна, не тратим на неё кадры
+    // (так больше времени остаётся телевизору и приставке)
+    if (Camera.seated && !stageEl.classList.contains('moving') && !state.fxT0 && Close.covers()) { this.dirty = true; return; }
     const gl = this.gl, u = this.u, c = this.cur;
     const phys = c.w[0] > 0.001 && c.s > 0.001, night = c.n > 0.001;
     const glow = Deer.level(c), rtx = Deer.rtxK(t), tvc = Deer.tvLight();
@@ -1256,6 +1268,7 @@ const TV = {
     clearTimeout(this._aud);
     this._aud = setTimeout(() => { if (this.on) Sound.startChannel(this.channel()); }, CFG.tv.powerOnMs * 0.4);
     this.activateVideo(true);
+    Sega.onTv(true);
     UI.onTvOn();
   },
   powerOff() {
@@ -1265,11 +1278,13 @@ const TV = {
     clearTimeout(this._aud);
     Sound.tvOff();
     this.activateVideo(false);
+    Sega.onTv(false);
   },
   toggle() { this.on ? this.powerOff() : this.powerOn(); },
 
   setChannel(i) {
     const n = CFG.channels.length;
+    if (Sega.active) { Sega.standby(); i = this.ch; }        // с входа AV — обратно на тот же канал
     this.activateVideo(false);
     this.ch = ((i % n) + n) % n;
     this.burstUntil = nowMs() + CFG.tv.staticBurstMs;
@@ -1282,7 +1297,7 @@ const TV = {
   isFeed(ch) { return !!ch && (ch.type === 'archive' || ch.type === 'video' || ch.type === 'rutube'); },
   activateVideo(on) {
     const ch = this.channel();
-    if (on && this.on && this.isFeed(ch)) Feed.play(ch); else Feed.stop();
+    if (on && this.on && !Sega.active && this.isFeed(ch)) Feed.play(ch); else Feed.stop();
   },
   /* кадр видео на «эфир»: 16:9 — с полосами, как на настоящем 4:3; чуть шире краёв, как у кинескопа */
   drawVideo(g, W, H, v) {
@@ -1297,6 +1312,7 @@ const TV = {
   drawContent(t) {
     const g = this.cx, W = this.content.width, H = this.content.height, ch = this.channel();
     const sec = (t - this.t0) / 1000;
+    if (Sega.active) { Sega.draw(g, W, H, sec); Channels.osd(g, W, H, t, this); return; }
     switch (ch.type) {
       case 'testcard': Channels.testcard(g, W, H, sec, ch); break;
       case 'morning':  Channels.morning(g, W, H, sec, ch); break;
@@ -1319,7 +1335,7 @@ const TV = {
     if (!s) { this.level = 0; return; }
     const ch = this.channel();
     const burst = clamp((this.burstUntil - t) / CFG.tv.staticBurstMs, 0, 1);
-    const st = Math.max(ch.type === 'static' ? 1 : 0, burst, s.st, this.isFeed(ch) ? Feed.noise() : 0);
+    const st = Sega.active ? Math.max(burst, s.st) : Math.max(ch.type === 'static' ? 1 : 0, burst, s.st, this.isFeed(ch) ? Feed.noise() : 0);
     if (s.sx * s.sy > 0) this.drawContent(t);
 
     if (t - this.lastSample > 110) { this.lastSample = t; this.sampleAvg(st); }
@@ -1337,7 +1353,7 @@ const TV = {
       gl.uniform1f(u.uFlicker, REDUCED ? 0 : 1);
       gl.uniform1f(u.uCurv, CFG.screen.curvature);
       gl.uniform1f(u.uScan, Math.min(240, H / 2.6));
-      gl.uniform1f(u.uGrain, (REDUCED ? 0.02 : 0.07) * (this.isFeed(ch) && Feed.showing() ? CFG.embed.crt : 1));
+      gl.uniform1f(u.uGrain, (REDUCED ? 0.02 : 0.07) * (Sega.active ? 0.35 : this.isFeed(ch) && Feed.showing() ? CFG.embed.crt : 1));
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     } else if (this.c2d) {
       const c = this.c2d, W = this.canvas.width, H = this.canvas.height;
@@ -1356,7 +1372,7 @@ const TV = {
   /* Средний цвет экрана — для свечения на стене */
   sampleAvg(st) {
     let r = 0.6, g = 0.62, b = 0.68;
-    if (this.isFeed(this.channel()) && Feed.showing()) {          // пиксели чужого плеера недоступны — «живое» голубое мерцание
+    if (!Sega.active && this.isFeed(this.channel()) && Feed.showing()) {          // пиксели чужого плеера недоступны — «живое» голубое мерцание
       const k = nowMs() / 1000;
       const v = 0.45 + 0.25 * Math.sin(k * 1.3) * Math.sin(k * 0.37) + 0.1 * Math.random();
       this.avg = [v * 0.85, v * 0.92, v * 1.05]; this.avgLum = v; return;
@@ -1524,18 +1540,14 @@ const Channels = {
     g.textAlign = 'center'; g.fillStyle = '#fff'; g.font = `16px ${PIX}`;
     if (Math.floor(sec * 1.2) % 2 === 0 || REDUCED) g.fillText('НЕТ СИГНАЛА', W / 2, H / 2 - 22);
     g.font = `8px ${PIX}`; g.fillStyle = '#cfe0ff';
-    if (!msg) g.fillText('положите видео в', W / 2, H / 2 + 14);
-    if (msg) { g.fillText(msg, W / 2, H / 2 + 22); return; }
-    const list = TV.clips(ch), first = list[0] || 'assets/video/…';
-    g.fillText(first.replace(/[^/]+$/, ''), W / 2, H / 2 + 30);
-    g.fillText(list.length ? `(${list.length} в плейлисте)` : 'и впишите в config.js', W / 2, H / 2 + 46);
+    g.fillText(msg || 'нет записей', W / 2, H / 2 + 22);
   },
 
   osd(g, W, H, t, tv) {
     g.textBaseline = 'middle';
     if (t < tv.osdChUntil) {
       g.textAlign = 'right'; g.font = `34px ${PIX}`;
-      const txt = String(tv.ch + 1);
+      const txt = Sega.active ? 'AV' : String(tv.ch + 1);
       g.lineWidth = 6; g.strokeStyle = 'rgba(0,0,0,.65)'; g.strokeText(txt, W - 24, 44);
       g.fillStyle = '#5dff6e'; g.fillText(txt, W - 24, 44);
     }
@@ -1592,6 +1604,9 @@ const Feed = {
     const k = Math.max(H / PH, W / CW) * (E.overscan || 1.06);
     this.el.style.setProperty('--yt-w', PW + 'px'); this.el.style.setProperty('--yt-h', PH + 'px');
     this.el.style.setProperty('--yt-k', k.toFixed(4));
+    const [SW, SH] = (CFG.sega && CFG.sega.frame) || [640, 480];
+    this.el.style.setProperty('--sega-w', SW + 'px'); this.el.style.setProperty('--sega-h', SH + 'px');
+    this.el.style.setProperty('--sega-k', (Math.min(W / SW, H / SH) * 0.955).toFixed(4));
     root.style.setProperty('--crt', E.crt);
   },
 
@@ -1636,28 +1651,40 @@ const Feed = {
     return list[ch._i];
   },
   fileUrl(id, name) { return `${ARCHIVE}/download/${id}/${name.split('/').map(encodeURIComponent).join('/')}`; },
+  /* имя файла: сначала — точный список из архива (если он уже пришёл), иначе — из конфига */
   resolveSync(it) {
     if (it.url) return it.url;
-    if (it.id && it.file) return this.fileUrl(it.id, Array.isArray(it.file) ? pick(it.file) : it.file);
     const m = it.id && this.meta[it.id];
     if (m && m.length) return this.fileUrl(it.id, pick(m));
+    if (it.id && it.file) return this.fileUrl(it.id, (Array.isArray(it.file) ? pick(it.file) : it.file).normalize('NFC'));
     return null;
+  },
+  async fetchMeta(it) {
+    if (this.meta[it.id] || this._metaP?.[it.id]) return (this._metaP || {})[it.id];
+    this._metaP = this._metaP || {};
+    return (this._metaP[it.id] = (async () => {
+      const r = await fetch(`${ARCHIVE}/metadata/${encodeURIComponent(it.id)}`, { mode: 'cors' });
+      const j = await r.json();
+      const N = x => x.normalize('NFC').replace(/\.ia\.mp4$/i, '.mp4');
+      const want = it.match ? null : (it.file ? new Set([].concat(it.file).map(N)) : null);
+      let files = (j.files || []).filter(f => /\.mp4$/i.test(f.name) && (!it.match || new RegExp(it.match, 'i').test(f.name)));
+      if (want) { const hit = files.filter(f => want.has(N(f.name))); if (hit.length) files = hit; }
+      // .ia.mp4 — копия, которую архив сам пережал в H.264 для просмотра в браузере: она играет везде
+      const ia = new Set(files.filter(f => /\.ia\.mp4$/i.test(f.name)).map(f => f.name.replace(/\.ia\.mp4$/i, '.mp4')));
+      const names = files.filter(f => /\.ia\.mp4$/i.test(f.name) || !ia.has(f.name)).map(f => f.name);
+      if (names.length) this.meta[it.id] = names;
+      return names;
+    })().finally(() => { delete this._metaP[it.id]; }));
   },
   /* без имени файла — спрашиваем у архива список роликов в записи */
   async resolve(it) {
     const now = this.resolveSync(it); if (now) return now;
     if (!it.id) return null;
-    const r = await fetch(`${ARCHIVE}/metadata/${encodeURIComponent(it.id)}`, { mode: 'cors' });
-    const j = await r.json();
-    const files = (j.files || []).filter(f => /\.mp4$/i.test(f.name) && (!it.match || new RegExp(it.match, 'i').test(f.name)));
-    // .ia.mp4 — копия, которую архив сам пережал в H.264 для просмотра в браузере: она играет везде
-    const ia = new Set(files.filter(f => /\.ia\.mp4$/i.test(f.name)).map(f => f.name.replace(/\.ia\.mp4$/i, '.mp4')));
-    const names = files.filter(f => /\.ia\.mp4$/i.test(f.name) || !ia.has(f.name)).map(f => f.name);
-    this.meta[it.id] = names;
-    return names.length ? this.fileUrl(it.id, pick(names)) : null;
+    await this.fetchMeta(it);
+    return this.resolveSync(it);
   },
   prefetch() {
-    for (const ch of CFG.channels) if (ch.type === 'archive') for (const it of this.items(ch)) if (it.id && !it.file && !this.meta[it.id]) this.resolve(it).catch(() => {});
+    for (const ch of CFG.channels) if (ch.type === 'archive') for (const it of this.items(ch)) if (it.id && !this.meta[it.id]) this.fetchMeta(it).catch(() => {});
   },
 
   /* ---------- управление ---------- */
@@ -1887,7 +1914,7 @@ const Feed = {
     return { tuning: 'ПОИСК СИГНАЛА…', skip: 'СЛЕДУЮЩАЯ ПЕРЕДАЧА' }[this.status] || null;
   },
   shape(s) {
-    const on = !!(s && s.sx * s.sy > 0 && this.ch && !this.failed && (this.mode === 'dom' || this.kind === 'rutube'));
+    const on = !!(s && s.sx * s.sy > 0 && ((this.ch && !this.failed && (this.mode === 'dom' || this.kind === 'rutube')) || Sega.onScreen()));
     this.el.style.transform = on ? `scale(${s.sx.toFixed(3)}, ${Math.max(s.sy, 0.006).toFixed(3)})` : 'scale(0)';
     if (this._on !== on) { this.el.style.opacity = on ? 1 : 0; this._on = on; }
   },
@@ -2150,10 +2177,10 @@ const Weather = {
    ========================================================================== */
 const SOUND_NAMES = [
   'room-tone', 'street-day', 'birds', 'children', 'street-evening', 'crickets',
-  'frying', 'siren', 'clock', 'door', 'dog', 'dog-far', 'thunder',
+  'frying', 'siren', 'door', 'dog', 'dog-far', 'thunder',
   'street-sunset', 'swifts', 'rain-light', 'rain-heavy',
   'tv-on', 'tv-off', 'channel-click', 'tv-static', 'tv-testcard', 'tv-morning',
-  'lamp-click', 'egg-sachet', 'egg-tamagotchi', 'egg-brickgame', 'egg-rubik', 'egg-bear', 'egg-cassette', 'egg-figurine', 'egg-teapot',
+  'lamp-click', 'egg-deer', 'egg-brickgame', 'egg-rubik', 'egg-bear', 'egg-cassette', 'egg-figurine', 'egg-teapot',
 ];
 const LOOP_NAMES = new Set(['rain-wash-light', 'rain-wash-heavy', 'rain-sill-light', 'rain-sill-heavy', 'room-tone', 'street-day', 'birds', 'children', 'street-sunset', 'swifts', 'street-evening', 'crickets', 'rain-light', 'rain-heavy', 'tv-static', 'tv-testcard', 'tv-morning']);
 
@@ -2502,7 +2529,7 @@ const Sound = {
   setMuted(m) {
     state.muted = m;
     if (this.master) this.master.gain.setTargetAtTime(m ? 0 : CFG.audio.master, this.ctx.currentTime, 0.06);
-    Feed.syncVolume();
+    Feed.syncVolume(); Sega.applyVolume();
   },
   setAmbience(v) { state.ambience = v; this.applyVent(); },
   /* форточка: улица и события тише/громче, тон комнаты не меняется */
@@ -2546,7 +2573,7 @@ const Sound = {
   setTvVolume(v) {
     state.tvVolume = v;
     if (this.tv) this.tv.gain.setTargetAtTime(v, this.ctx.currentTime, 0.04);
-    Feed.syncVolume();
+    Feed.syncVolume(); Sega.applyVolume();
   },
 
   /* ---------- фон: группа звуков на каждую сцену ---------- */
@@ -3017,6 +3044,69 @@ const Sound = {
       for (let i = 0; i < d.length; i++) { y += k * (d[i] - y); d[i] = y; }
     });
   },
+  /* ---------- приставка ---------- */
+  segaIn() {                                     // вход для звука эмулятора: каждый раз новый, чтобы обрывки старой игры не звучали
+    this.segaCut();
+    const g = this._sega = this.g(TV.on ? CFG.sega.volume : 0);
+    g.connect(this.tv);
+    return g;
+  },
+  segaGate(on) { if (this._sega) this._sega.gain.setTargetAtTime(on ? CFG.sega.volume : 0, this.ctx.currentTime, 0.03); },
+  segaCut() { if (this._sega) { try { this._sega.disconnect(); } catch (_) {} this._sega = null; } },
+  /* картридж в слот: шорох пластика по направляющим и тугой «щёлк», когда он садится в разъём */
+  cartIn() {
+    if (!this.started) return;
+    const out = this.spotNode(this.sfx, 'room', 0.75), t = this.ctx.currentTime + 0.02;
+    const b = this.baked('cart-in', 0.42, (d, sr) => {
+      const R = (a, b) => a + Math.random() * (b - a);
+      let y1 = 0, y2 = 0;                               // шорох: шум через полосовой ~1,8 кГц, нарастает к концу хода
+      const f = 1800 / sr, q = 1.1, w = 2 * Math.PI * f, al = Math.sin(w) / (2 * q), cw = Math.cos(w);
+      const b0 = al / (1 + al), a1 = -2 * cw / (1 + al), a2 = (1 - al) / (1 + al);
+      let x1 = 0, x2 = 0;
+      for (let i = 0; i < 0.17 * sr; i++) {
+        const t = i / sr, x = Math.random() * 2 - 1, y = b0 * x - b0 * x2 - a1 * y1 - a2 * y2;
+        x2 = x1; x1 = x; y2 = y1; y1 = y;
+        const env = Math.pow(t / 0.17, 1.6) * (0.6 + 0.4 * Math.sin(t * 2 * Math.PI * 37)) * 0.35;
+        d[i] += y * env;
+      }
+      for (const [t0, a] of [[0.172, 1], [0.205, 0.35]]) {     // щелчок и досадка
+        const i0 = Math.floor(t0 * sr), modes = [[R(130, 150), 0.03, 0.55], [R(590, 650), 0.012, 0.35], [R(1380, 1500), 0.006, 0.3], [R(2900, 3300), 0.003, 0.12]];
+        for (let i = i0; i < d.length; i++) {
+          const t = (i - i0) / sr; if (t > 0.15) break;
+          let x = 0.35 * Math.exp(-t / 0.0015) * (Math.random() * 2 - 1);
+          for (const [fr, tau, amp] of modes) x += amp * Math.exp(-t / tau) * Math.sin(2 * Math.PI * fr * t);
+          d[i] += a * x;
+        }
+      }
+      let y = 0; const k = 1 - Math.exp(-2 * Math.PI * 6000 / sr);
+      for (let i = 0; i < d.length; i++) { y += k * (d[i] - y); d[i] = y; }
+    });
+    const s = this.ctx.createBufferSource(), g = this.g(CFG.audio.sfxVolume * 0.9);
+    s.buffer = b; s.connect(g).connect(out); s.start(t); s.onended = () => g.disconnect();
+  },
+  /* ползунок питания приставки; при включении — едва слышный «бум» в динамике телевизора */
+  segaSwitch(on) {
+    if (!this.started) return;
+    const out = this.spotNode(this.sfx, 'room', 0.75), t = this.ctx.currentTime + 0.01;
+    const b = this.baked('sega-switch', 0.2, (d, sr) => {
+      for (let i = 0; i < 0.035 * sr; i++) { const t = i / sr; d[i] += (Math.random() * 2 - 1) * 0.25 * Math.sin(Math.PI * t / 0.035); }
+      const i0 = Math.floor(0.036 * sr);
+      for (let i = i0; i < d.length; i++) {
+        const t = (i - i0) / sr;
+        d[i] += Math.exp(-t / 0.004) * (0.6 * Math.sin(2 * Math.PI * 920 * t) + 0.4 * Math.sin(2 * Math.PI * 2150 * t + 1)) + 0.5 * Math.exp(-t / 0.02) * Math.sin(2 * Math.PI * 110 * t) + 0.3 * Math.exp(-t / 0.0008) * (Math.random() * 2 - 1);
+      }
+      let y = 0; const k = 1 - Math.exp(-2 * Math.PI * 5500 / sr);
+      for (let i = 0; i < d.length; i++) { y += k * (d[i] - y); d[i] = y; }
+    });
+    const s = this.ctx.createBufferSource(), g = this.g(CFG.audio.sfxVolume * 0.6);
+    s.buffer = b; s.playbackRate.value = on ? 1 : 0.9; s.connect(g).connect(out); s.start(t); s.onended = () => g.disconnect();
+    if (on && TV.on) {
+      const o = this.o('sine', 58), gg = this.g(0);
+      o.connect(gg).connect(this.tv);
+      gg.gain.setValueAtTime(0, t + 0.04); gg.gain.linearRampToValueAtTime(0.18, t + 0.05); gg.gain.setTargetAtTime(0, t + 0.06, 0.03);
+      o.start(t + 0.04); o.stop(t + 0.4); o.onended = () => gg.disconnect();
+    }
+  },
   knobOut() {
     if (this._knob) return this._knob;
     const g = this.g(0.55), p = this.ctx.createPanner ? this.ctx.createPanner() : null;
@@ -3059,6 +3149,7 @@ const Sound = {
   startChannel(ch) {
     if (!this.started) return;
     this.stopChannel();
+    if (Sega.active) return;                      // на входе AV звук идёт из приставки
     const tv = this.tv;
     if (ch.type === 'testcard') {
       this._chan = this.loop('tv-testcard', tv, 0.8, () => {
@@ -3315,6 +3406,7 @@ const Zones = {
       { id: 'lamp', cls: 'lamp', pad: 0.05, label: () => T.lamp[nextIn(CFG.timeCycle, state.mode)] },
       { id: 'window', cls: 'window', pad: 0, label: () => T.weatherNext[nextIn(CFG.weatherCycle, state.weather)] },
       { id: 'drape', cls: 'drape', pad: 0, label: () => T.drape[Vent.index()] },
+      { id: 'sega', cls: 'sega', pad: 0, label: () => Sega.label() },
       ...CFG.eggs.map(e => ({ id: e.id, cls: 'egg' + (e.eveningOnly ? ' evening-only' : ''), pad: 0.22, label: () => e.label, egg: e })),
     ];
   },
@@ -3438,6 +3530,10 @@ const Zones = {
       setWeather(nextIn(CFG.weatherCycle, state.weather));
       UI.toast(T.weatherNow[state.weather], 2600);
       if (HOVER && el.matches(':hover')) this.showCaption(el);
+    } else if (d.id === 'sega') {
+      this.hideCaption();
+      if (!Sega.active && Sega.frame && !Sega.menuOpen) Sega.resume();
+      Sega.openMenu();
     } else if (d.egg) {
       this.playEgg(d.egg, el);
     }
@@ -3550,6 +3646,434 @@ const Deer = {
   },
   /* щелчок по статуэтке: «подзарядили» — вспыхивает и снова медленно гаснет */
   poke() { this.flashT = nowMs(); this.charge = 1; GLRoom.dirty = true; },
+};
+
+/* ==========================================================================
+   7a2. ПРИСТАВКА (Mega Drive на полу)
+   Эмулятор (EmulatorJS + Genesis Plus GX) живёт в рамке sega.html прямо за кинескопом.
+   Кадр игры забирает шейдер телевизора — со строками, кривизной и свечением на стене;
+   звук идёт в «динамик» телевизора (общий AudioContext); кнопки, геймпад и экранный
+   джойстик читает комната и передаёт в эмулятор. Картриджи — свои игры (carts/*.bin)
+   и любой файл, который пользователь выберет сам.
+   ========================================================================== */
+/* клавиатура → кнопки RetroPad (так их понимает Genesis Plus GX: B=B, Y=A, A=C, L/X/R=X/Y/Z) */
+const PAD_KEYS = {
+  ArrowUp: 4, ArrowDown: 5, ArrowLeft: 6, ArrowRight: 7,
+  KeyA: 1, KeyS: 0, KeyD: 8, KeyZ: 1, KeyX: 0, KeyC: 8,
+  KeyQ: 10, KeyW: 9, KeyE: 11, Enter: 3, NumpadEnter: 3, ShiftRight: 2,
+};
+/* стандартный геймпад (Xbox / PlayStation / 8BitDo) → RetroPad:
+   левая, нижняя, правая кнопки — A, B, C; верхняя и плечи — X, Y, Z */
+const PAD_BUTTONS = { 2: 1, 0: 0, 1: 8, 4: 10, 3: 9, 5: 11, 6: 10, 7: 11, 9: 3, 8: 2, 12: 4, 13: 5, 14: 6, 15: 7 };
+const Sega = {
+  active: false, status: 'off', frame: null, api: null, cart: null, own: null,
+  menuOpen: false, mode: 'gl', src: {}, sent: [new Set(), new Set()], pads: 0,
+  init() {
+    const S = CFG.sega; if (!S) return;
+    window.TubeTVHost = { audio: () => this.audioFor() };
+    this.buildMenu(); this.buildPad();
+    addEventListener('message', e => this.onMessage(e));
+    addEventListener('keydown', e => this.onKey(e, true), true);
+    addEventListener('keyup', e => this.onKey(e, false), true);
+    addEventListener('blur', () => this.releaseAll());
+    addEventListener('gamepadconnected', e => {
+      this.pads++; this.syncPadLabel();
+      if (this.active || this.menuOpen) UI.toast(T.segaPadOn.replace('%s', this.padName(e.gamepad)), 2600);
+    });
+    addEventListener('gamepaddisconnected', () => { this.pads = Math.max(0, this.pads - 1); this.syncPadLabel(); this.releaseAll(); });
+    // картридж можно просто перетащить на страницу
+    addEventListener('dragover', e => { if (e.dataTransfer && [...e.dataTransfer.types].includes('Files')) e.preventDefault(); });
+    addEventListener('drop', e => {
+      const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+      if (!f) return; e.preventDefault(); this.insertFile(f);
+    });
+    document.addEventListener('visibilitychange', () => {
+      if (!this.api) return;
+      if (document.hidden) { this.releaseAll(); this.api.pause(); }
+      else if (this.shouldRun()) this.api.play();
+    });
+  },
+  label() { return this.active ? T.segaZoneOn : T.segaZone; },
+  shouldRun() { return this.active && this.status === 'running' && TV.on && !this.menuOpen && !document.hidden; },
+  onScreen() { return this.active && !!this.frame; },
+
+  /* ---------- меню картриджей ---------- */
+  buildMenu() {
+    const S = CFG.sega, m = document.createElement('div');
+    m.id = 'segaMenu'; m.className = 'sega-menu'; m.hidden = true;
+    m.setAttribute('role', 'dialog'); m.setAttribute('aria-modal', 'true'); m.setAttribute('aria-labelledby', 'segaTitle');
+    const cart = c => `<button type="button" class="sm-cart" data-cart="${c.id}">
+        <span class="cart" aria-hidden="true"><span class="c-top"></span><span class="c-label" style="background-image:url('${c.label}')"></span><span class="c-grip"></span></span>
+        <span class="sm-name">${c.title}</span><span class="sm-desc">${c.desc}</span></button>`;
+    m.innerHTML = `<div class="sm-box">
+      <div class="sm-head"><b id="segaTitle">${T.segaTitle}</b><span class="sm-pad"></span>
+        <button type="button" class="sm-x" data-act="close" aria-label="${T.segaClose}">×</button></div>
+      <div class="sm-now" hidden><span class="sm-now-t"></span>
+        <button type="button" class="sm-btn main" data-act="resume">${T.segaResume}</button>
+        <button type="button" class="sm-btn" data-act="reset">${T.segaReset}</button>
+        <button type="button" class="sm-btn" data-act="off">${T.segaOff}</button></div>
+      <div class="sm-carts">${S.carts.map(cart).join('')}
+        <button type="button" class="sm-cart own" data-act="file">
+          <span class="cart empty" aria-hidden="true"><span class="c-top"></span><span class="c-label"><i>+</i></span><span class="c-grip"></span></span>
+          <span class="sm-name">${T.segaOwn}</span><span class="sm-desc">${T.segaOwnDesc}</span></button>
+      </div>
+      <div class="sm-keys">${T.segaKeys}</div>
+      <input type="file" class="sm-file" tabindex="-1" aria-hidden="true">
+    </div>`;
+    document.getElementById('app').appendChild(m);
+    this.menu = m;
+    const file = m.querySelector('.sm-file');
+    // на iPhone и iPad фильтр по незнакомым расширениям делает все файлы серыми — там проверяем имя сами
+    if (!matchMedia('(pointer: coarse)').matches) file.accept = S.accept;
+    file.addEventListener('change', () => { const f = file.files && file.files[0]; file.value = ''; if (f) this.insertFile(f); });
+    m.addEventListener('click', e => {
+      if (e.target === m) return this.closeMenu();
+      const b = e.target.closest('button'); if (!b) return;
+      Sound.start();
+      const id = b.dataset.cart, act = b.dataset.act;
+      if (id) this.insert(S.carts.find(c => c.id === id), b);
+      else if (act === 'file') file.click();
+      else if (act === 'close') this.closeMenu();
+      else if (act === 'resume') { this.closeMenu(); this.wake(); }
+      else if (act === 'reset') { this.closeMenu(); if (this.api) { this.api.reset(); Sound.segaSwitch(true); } }
+      else if (act === 'off') { this.closeMenu(); this.powerOff(); }
+    });
+    this.syncPadLabel();
+  },
+  focusables() { return [...this.menu.querySelectorAll('button')].filter(b => b.offsetParent !== null); },
+  moveFocus(dir) {
+    const f = this.focusables().filter(b => !b.classList.contains('sm-x')); if (!f.length) return;
+    const i = f.indexOf(document.activeElement);
+    f[(i < 0 ? 0 : (i + dir + f.length) % f.length)].focus();
+  },
+  padName(gp) { return (gp && gp.id ? gp.id.replace(/\s*\(.*?\)\s*/g, ' ').trim() : '') || T.segaPadGeneric; },
+  syncPadLabel() {
+    if (!this.menu) return;
+    const gp = navigator.getGamepads ? [...navigator.getGamepads()].find(Boolean) : null;
+    const el = this.menu.querySelector('.sm-pad');
+    el.textContent = gp ? T.segaPadOn.replace('%s', this.padName(gp)) : T.segaPadOff;
+    el.classList.toggle('on', !!gp);
+  },
+  openMenu() {
+    if (this.menuOpen) return;
+    Sound.start();
+    this.menuOpen = true; this.releaseAll();
+    if (this.api) this.api.pause();
+    this.prefetch();
+    const now = this.menu.querySelector('.sm-now');
+    now.hidden = !(this.active && this.frame);
+    if (!now.hidden) now.querySelector('.sm-now-t').textContent = T.segaNow.replace('%s', this.cart ? this.cart.title : '');
+    for (const b of this.menu.querySelectorAll('.sm-cart')) b.classList.toggle('current', !!this.cart && b.dataset.cart === this.cart.id);
+    this.syncPadLabel();
+    this.menu.hidden = false;
+    document.body.classList.add('sega-menu-open');
+    requestAnimationFrame(() => {
+      this.menu.classList.add('show');
+      const first = this.menu.querySelector(now.hidden ? '.sm-cart' : '.sm-btn.main');
+      if (first) first.focus({ preventScroll: true });
+    });
+    Zones.hideCaption();
+  },
+  closeMenu() {
+    if (!this.menuOpen) return;
+    this.menuOpen = false;
+    this.menu.classList.remove('show');
+    document.body.classList.remove('sega-menu-open');
+    setTimeout(() => { if (!this.menuOpen) this.menu.hidden = true; }, 220);
+    if (document.activeElement && this.menu.contains(document.activeElement)) document.activeElement.blur();
+    this._skipPad = nowMs() + 350;                 // кнопка, которой выбрали, не «нажмётся» в игре
+    if (this.api && this.shouldRun()) this.api.play();
+  },
+  /* ядро эмулятора тяжёлое (~2 МБ) — начинаем качать, как только открыли меню */
+  prefetch() {
+    if (this._pf) return; this._pf = true;
+    let gl2 = false; try { gl2 = !!document.createElement('canvas').getContext('webgl2'); } catch (_) {}
+    const core = `vendor/ejs/data/cores/genesis_plus_gx${gl2 ? '' : '-legacy'}-wasm.data`;
+    for (const u of [core, 'vendor/ejs/data/src/emulator.js', 'vendor/ejs/data/emulator.css']) fetch(u).catch(() => {});
+  },
+
+  /* ---------- картридж ---------- */
+  insertFile(f) {
+    const ok = /\.(md|bin|gen|smd|68k|sgd|zip|7z)$/i.test(f.name);
+    if (!ok) { UI.toast(T.segaBadFile, 3200); return; }
+    this.own = f;
+    this.insert({ id: 'own', title: f.name.replace(/\.[^.]+$/, ''), file: f });
+  },
+  async insert(cart, btn) {
+    if (!cart) return;
+    await Sound.start();
+    if (btn) { const c = btn.querySelector('.cart'); if (c) wa(c, [{ transform: 'none' }, { transform: 'translateY(14%) scale(.94)', opacity: 0.6 }], { duration: 220, easing: 'ease-in' }); }
+    this.closeMenu();
+    this.destroy();
+    this.cart = cart; this.active = true; this.status = 'loading'; this.t0 = nowMs(); this.mode = 'gl';
+    document.body.classList.add('sega-on');
+    Feed.stop(); Sound.stopChannel();
+    Sound.cartIn();
+    setTimeout(() => Sound.segaSwitch(true), 520);
+    const wasOn = TV.on;
+    setTimeout(() => {
+      if (!this.active) return;
+      if (!TV.on) TV.powerOn(); else { TV.burstUntil = nowMs() + CFG.tv.staticBurstMs; Sound.channelClick(true); }
+      TV.osdChUntil = nowMs() + 2200;
+      if (!Camera.seated) Camera.toggle(true);
+      this.load(cart);
+    }, wasOn ? 640 : 560);
+    Zones.refreshLabels();
+  },
+  load(cart) {
+    const S = CFG.sega, f = document.createElement('iframe');
+    let rom = cart.rom, name = '';
+    if (cart.file) { rom = URL.createObjectURL(cart.file); name = cart.file.name; }
+    const q = new URLSearchParams({ rom, vol: String(state.tvVolume) }); if (name) q.set('name', name);
+    f.className = 'sega'; f.title = T.segaTitle; f.tabIndex = -1;
+    f.setAttribute('allow', 'autoplay; gamepad'); f.setAttribute('aria-hidden', 'true');
+    f.width = S.frame[0]; f.height = S.frame[1];
+    f.src = 'sega.html?' + q.toString();
+    Feed.el.classList.add('sega'); Feed.el.classList.remove('revealed');
+    Feed.el.prepend(f);
+    this.frame = f; this.api = null; this.blob = cart.file ? rom : null;
+    clearTimeout(this._to);
+    this._to = setTimeout(() => { if (this.frame === f && this.status === 'loading') this.fail('timeout'); }, 40000);
+  },
+  onMessage(e) {
+    if (!this.frame || e.source !== this.frame.contentWindow || !e.data || e.data.from !== 'sega') return;
+    const d = e.data;
+    if (d.type === 'start') {
+      clearTimeout(this._to);
+      try { this.api = this.frame.contentWindow.TubeSega; } catch (_) { this.api = null; }
+      this.status = 'running'; this.shared = !!d.shared;
+      this.applyVolume();
+      if (!this.shouldRun() && this.api) this.api.pause();
+      if (!this._hinted) { this._hinted = true; UI.toast(matchMedia('(pointer: coarse)').matches && !HOVER ? T.segaHintTouch : T.segaHint, 6500); }
+    } else if (d.type === 'error') this.fail(d.msg);
+  },
+  fail(msg) {
+    console.warn('[Tube TV] приставка:', msg);
+    clearTimeout(this._to);
+    this.status = 'error'; this.api = null;
+    UI.toast(T.segaFail, 4200);
+  },
+  /* выключить приставку совсем: рамка удаляется, телевизор возвращается на канал */
+  powerOff() {
+    if (!this.active && !this.frame) return;
+    Sound.segaSwitch(false);
+    const wasActive = this.active;
+    this.destroy(); this.cart = null;
+    if (wasActive) this.backToTv();
+    Zones.refreshLabels();
+  },
+  /* ручкой каналов ушли с AV: игра на паузе, вернуться можно из меню приставки */
+  standby() {
+    if (!this.active) return;
+    this.active = false; this.releaseAll();
+    if (this.api) this.api.pause();
+    Sound.segaGate(false);
+    document.body.classList.remove('sega-on');
+    Feed.el.classList.remove('sega', 'revealed');
+    clearTimeout(this._idle);
+    this._idle = setTimeout(() => { if (!this.active) { this.destroy(); this.cart = null; } }, 180000);
+    Zones.refreshLabels();
+  },
+  backToTv() {
+    this.active = false;
+    document.body.classList.remove('sega-on');
+    TV.burstUntil = nowMs() + CFG.tv.staticBurstMs; TV.osdChUntil = nowMs() + 2200;
+    if (TV.on) { Sound.startChannel(TV.channel()); TV.activateVideo(true); }
+  },
+  resume() {                                   // вернуться к поставленной на паузу игре
+    if (!this.frame) return false;
+    clearTimeout(this._idle);
+    this.active = true; document.body.classList.add('sega-on');
+    Feed.stop(); Sound.stopChannel();
+    Feed.el.classList.add('sega'); if (this.mode === 'dom') Feed.el.classList.add('revealed');
+    TV.burstUntil = nowMs() + CFG.tv.staticBurstMs; TV.osdChUntil = nowMs() + 2200;
+    this.applyVolume();
+    if (this.api && this.shouldRun()) this.api.play();
+    Zones.refreshLabels();
+    return true;
+  },
+  /* «продолжить»: вход AV, телевизор включён, сидим перед экраном */
+  wake() {
+    if (!this.frame) return;
+    if (!this.active) this.resume();
+    if (!TV.on) TV.powerOn();
+    if (!Camera.seated) Camera.toggle(true);
+    if (this.api && this.shouldRun()) this.api.play();
+  },
+  destroy() {
+    clearTimeout(this._to); clearTimeout(this._idle);
+    this.releaseAll();
+    if (this.frame) { try { this.frame.remove(); } catch (_) {} }
+    if (this.blob) { try { URL.revokeObjectURL(this.blob); } catch (_) {} }
+    this.frame = null; this.api = null; this.blob = null; this.status = 'off'; this.active = false;
+    Sound.segaCut();
+    Feed.el.classList.remove('sega', 'revealed');
+    document.body.classList.remove('sega-on');
+  },
+  /* телевизор включили / выключили */
+  onTv(on) {
+    if (!this.active) return;
+    this.releaseAll();
+    this.applyVolume();
+    if (!this.api) return;
+    if (on && this.shouldRun()) this.api.play(); else if (!on) this.api.pause();
+  },
+  audioFor() {
+    if (!Sound.ctx || !Sound.tv) return null;
+    return { ctx: Sound.ctx, dest: Sound.segaIn() };
+  },
+  applyVolume() {
+    Sound.segaGate(this.active && TV.on);
+    if (this.api && !this.shared) this.api.volume(this.active && TV.on && !state.muted ? state.tvVolume : 0);
+  },
+
+  /* ---------- картинка ---------- */
+  draw(g, W, H, sec) {
+    if (this.status === 'running' && this.api && this.mode === 'gl') {
+      let c = null; try { c = this.api.canvas(); } catch (_) {}
+      if (c && c.width > 0) {
+        try {
+          // чуть меньше стекла: края кадра (там у игр счёт и жизни) не уходят под изгиб кинескопа
+          const os = 0.955, w = W * os, h = H * os;
+          g.fillStyle = '#000'; g.fillRect(0, 0, W, H);
+          g.drawImage(c, (W - w) / 2, (H - h) / 2, w, h);
+          return;
+        } catch (err) {                          // кадр не отдали — показываем рамку под стеклом
+          console.warn('[Tube TV] приставка: кадр под стеклом', err && err.message);
+          this.mode = 'dom'; Feed.el.classList.add('revealed');
+        }
+      }
+    }
+    g.fillStyle = '#000'; g.fillRect(0, 0, W, H);
+    if (this.status === 'error') {
+      g.fillStyle = '#1736c4'; g.fillRect(0, 0, W, H);
+      g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillStyle = '#fff'; g.font = `14px ${PIX}`;
+      g.fillText(T.segaScreenFail, W / 2, H / 2 - 12);
+      g.font = `8px ${PIX}`; g.fillStyle = '#cfe0ff'; g.fillText(T.segaScreenFail2, W / 2, H / 2 + 16);
+    } else if (this.status === 'loading' && nowMs() - this.t0 > 900) {
+      g.textAlign = 'center'; g.textBaseline = 'middle'; g.font = `9px ${PIX}`; g.fillStyle = '#7f8fb0';
+      if (Math.floor(sec * 1.5) % 2 === 0 || REDUCED) g.fillText(T.segaLoading, W / 2, H / 2);
+    }
+  },
+
+  /* ---------- кнопки ---------- */
+  press(source, idx, on) {
+    const s = this.src[source] || (this.src[source] = new Set());
+    if (on) s.add(idx); else s.delete(idx);
+    this.flush();
+  },
+  setSource(source, set) { this.src[source] = set; this.flush(); },
+  flush() {
+    const want = [new Set(), new Set()];
+    for (const [k, s] of Object.entries(this.src)) { const p = k === 'pad1' ? 1 : 0; for (const i of s) want[p].add(i); }
+    for (let p = 0; p < 2; p++) {
+      for (const i of this.sent[p]) if (!want[p].has(i)) this.send(p, i, 0);
+      for (const i of want[p]) if (!this.sent[p].has(i)) this.send(p, i, 1);
+      this.sent[p] = want[p];
+    }
+  },
+  /* короткое нажатие (клавишу отпустили в тот же кадр) эмулятор мог бы не заметить — держим кнопку хотя бы 2 кадра */
+  send(p, i, v) {
+    const key = p * 32 + i, now = nowMs(), api = this.api;
+    this._dn = this._dn || {}; this._rl = this._rl || {};
+    clearTimeout(this._rl[key]);
+    const out = x => { if (api && api === this.api) try { api.input(p, i, x); } catch (_) {} };
+    if (v) { this._dn[key] = now; out(1); return; }
+    const left = 60 - (now - (this._dn[key] || 0));
+    if (left > 0) this._rl[key] = setTimeout(() => out(0), left); else out(0);
+  },
+  releaseAll() { for (const k of Object.keys(this.src)) this.src[k] = new Set(); this.flush(); if (this.padEl) for (const b of this.padEl.querySelectorAll('.down')) b.classList.remove('down'); },
+  onKey(e, down) {
+    if (this.menuOpen) {
+      // в меню свои клавиши: стрелки — выбор, Enter — вставить, Esc — закрыть; клавиши комнаты молчат
+      e.stopImmediatePropagation();
+      if (!down) return;
+      if (e.key === 'Escape') { e.preventDefault(); this.closeMenu(); return; }
+      const dir = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key];
+      if (dir) { e.preventDefault(); this.moveFocus(dir); return; }
+      if (e.key === 'Tab') {                          // фокус не уходит из окна
+        const f = this.focusables(), i = f.indexOf(document.activeElement);
+        if (e.shiftKey && i <= 0) { e.preventDefault(); f[f.length - 1].focus(); }
+        else if (!e.shiftKey && (i === f.length - 1 || i < 0)) { e.preventDefault(); f[0].focus(); }
+      }
+      return;
+    }
+    if (!this.active || !this.frame || state.calibrating) return;
+    if (e.target && e.target.closest && e.target.closest('input, textarea, select')) return;
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.code === 'Escape') { if (down) { e.preventDefault(); e.stopImmediatePropagation(); this.openMenu(); } return; }
+    const idx = PAD_KEYS[e.code];
+    if (idx == null) return;
+    e.preventDefault(); e.stopImmediatePropagation();
+    if (this.status !== 'running' || (down && e.repeat)) return;
+    this.press('kb', idx, down);
+  },
+  /* геймпады опрашиваются каждый кадр; в меню — листаем картриджи */
+  poll(t) {
+    if (!(this.active || this.menuOpen) || !navigator.getGamepads) return;
+    let list; try { list = [...navigator.getGamepads()].filter(g => g && g.connected !== false); } catch (_) { return; }
+    if (!list.length) { if (this.src.pad0 && this.src.pad0.size || this.src.pad1 && this.src.pad1.size) { this.src.pad0 = new Set(); this.src.pad1 = new Set(); this.flush(); } return; }
+    const read = gp => {
+      const s = new Set();
+      gp.buttons.forEach((b, i) => { if ((b.pressed || b.value > 0.5) && PAD_BUTTONS[i] != null) s.add(PAD_BUTTONS[i]); });
+      const ax = gp.axes[0] || 0, ay = gp.axes[1] || 0;
+      if (ax < -0.5) s.add(6); if (ax > 0.5) s.add(7); if (ay < -0.5) s.add(4); if (ay > 0.5) s.add(5);
+      return s;
+    };
+    const s0 = read(list[0]), home = list[0].buttons[16] && list[0].buttons[16].pressed;
+    if (this.menuOpen) {                         // меню: крестовина — выбор, A/Start — вставить, B — назад
+      const prev = this._mp || new Set(), hit = i => s0.has(i) && !prev.has(i);
+      if (hit(7) || hit(5)) this.moveFocus(1);
+      if (hit(6) || hit(4)) this.moveFocus(-1);
+      if (hit(0) || hit(3)) { const a = document.activeElement; if (a && this.menu.contains(a)) a.click(); }
+      if (hit(8) && this.frame) this.closeMenu();
+      this._mp = s0; this._home = home;
+      return;
+    }
+    this._mp = s0;
+    if (home && !this._home) { this._home = home; this.openMenu(); return; }
+    this._home = home;
+    if (this.status !== 'running' || !TV.on) return;
+    if (this._skipPad && t < this._skipPad) return;
+    this.src.pad0 = s0; this.src.pad1 = list[1] ? read(list[1]) : new Set();
+    this.flush();
+  },
+
+  /* ---------- экранный джойстик (телефон, планшет) ---------- */
+  buildPad() {
+    const p = document.createElement('div');
+    p.id = 'segaPad'; p.className = 'sega-pad'; p.setAttribute('aria-hidden', 'true');
+    p.innerHTML = `<div class="sp-dpad"><i class="u"></i><i class="d"></i><i class="l"></i><i class="r"></i><b></b></div>
+      <div class="sp-abc"><button type="button" data-i="1">A</button><button type="button" data-i="0">B</button><button type="button" data-i="8">C</button></div>
+      <button type="button" class="sp-start" data-i="3">START</button>
+      <button type="button" class="sp-menu" aria-label="${T.segaTitle}">☰</button>`;
+    document.getElementById('app').appendChild(p);
+    this.padEl = p;
+    const vib = () => { try { navigator.vibrate && navigator.vibrate(6); } catch (_) {} };
+    for (const b of p.querySelectorAll('[data-i]')) {
+      const i = +b.dataset.i, src = 'touch' + i;
+      const dn = e => { e.preventDefault(); try { b.setPointerCapture(e.pointerId); } catch (_) {} b.classList.add('down'); this.press(src, i, true); vib(); };
+      const up = e => { e.preventDefault(); b.classList.remove('down'); this.press(src, i, false); };
+      b.addEventListener('pointerdown', dn); b.addEventListener('pointerup', up); b.addEventListener('pointercancel', up);
+      b.addEventListener('contextmenu', e => e.preventDefault());
+    }
+    p.querySelector('.sp-menu').addEventListener('click', () => this.openMenu());
+    const dp = p.querySelector('.sp-dpad');
+    const dirs = e => {
+      const r = dp.getBoundingClientRect(), x = (e.clientX - r.left) / r.width * 2 - 1, y = (e.clientY - r.top) / r.height * 2 - 1;
+      const s = new Set(); if (Math.hypot(x, y) < 0.22) return s;
+      const a = Math.atan2(y, x) * 180 / Math.PI;       // 8 направлений: диагонали — по 45°
+      if (a > -157.5 && a < -22.5) s.add(4); if (a > 22.5 && a < 157.5) s.add(5);
+      if (a > 112.5 || a < -112.5) s.add(6); if (a > -67.5 && a < 67.5) s.add(7);
+      return s;
+    };
+    const show = s => { for (const [c, i] of [['u', 4], ['d', 5], ['l', 6], ['r', 7]]) dp.querySelector('.' + c).classList.toggle('on', s.has(i)); };
+    let cur = null;
+    dp.addEventListener('pointerdown', e => { e.preventDefault(); try { dp.setPointerCapture(e.pointerId); } catch (_) {} cur = e.pointerId; const s = dirs(e); show(s); this.setSource('touchpad', s); vib(); });
+    dp.addEventListener('pointermove', e => { if (e.pointerId !== cur) return; const s = dirs(e); show(s); this.setSource('touchpad', s); });
+    const end = e => { if (e.pointerId !== cur) return; cur = null; show(new Set()); this.setSource('touchpad', new Set()); };
+    dp.addEventListener('pointerup', end); dp.addEventListener('pointercancel', end);
+  },
 };
 
 /* ==========================================================================
@@ -4242,6 +4766,7 @@ const UI = {
     }
   },
   toast(text, ms) {
+    $('#intro').classList.remove('show');                 // подсказка и сообщение не наслаиваются
     const t = $('#toast'); t.textContent = text; t.classList.add('show');
     clearTimeout(this._tt); this._tt = setTimeout(() => t.classList.remove('show'), ms);
   },
@@ -4378,6 +4903,7 @@ function init() {
   Zones.init();
   Puppets.init();
   Deer.init();
+  Sega.init();
   UI.init();
   applyScene(true);
   layout();
@@ -4441,6 +4967,7 @@ function init() {
     }
     TV.render(t);
     Zones.paintKnobs(t);
+    Sega.poll(t);
     Light.update(t);
     Dust.update(t, dt);
     Weather.update(t, dt);
@@ -4448,7 +4975,7 @@ function init() {
   };
   requestAnimationFrame(frame);
 
-  window.TubeTV = { GLRoom, BG, TV, Sound, Events, setMode, setWeather, Calib, Puppets, Camera, Feed, Deer, Vent, Wind, Weather, state, CFG };   // для отладки из консоли
+  window.TubeTV = { GLRoom, BG, TV, Sound, Events, setMode, setWeather, Calib, Puppets, Camera, Feed, Deer, Vent, Wind, Weather, Sega, state, CFG };   // для отладки из консоли
 }
 
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();

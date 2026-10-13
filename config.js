@@ -114,6 +114,23 @@ window.TUBE_TV_CONFIG = {
      за края стекла, как у настоящего кинескопа. */
   embed: { crt: 0.12, overscan: 1.06 },
 
+  /* ---------- ПРИСТАВКА ----------
+     Картриджи — свои игры (исходники в carts/src, собраны SGDK). Любой другой файл
+     пользователь выбирает сам («Свой картридж…») или просто перетаскивает на страницу. */
+  sega: {
+    volume: 1.3,                         // громкость приставки в динамике телевизора (игры тише телеэфира)
+    frame: [640, 480],                   // размер невидимой рамки эмулятора (кадр 4:3)
+    accept: '.md,.bin,.gen,.smd,.68k,.sgd,.zip,.7z',
+    carts: [
+      { id: 'snake',  title: 'Змейка',           rom: 'carts/snake.bin',  label: 'assets/carts/snake.webp',
+        desc: 'Двор, яблоки и золотая груша' },
+      { id: 'bricks', title: 'Кирпичики',        rom: 'carts/bricks.bin', label: 'assets/carts/bricks.webp',
+        desc: 'Выбей все кирпичи — дальше быстрее' },
+      { id: 'patrol', title: 'Звёздный патруль', rom: 'carts/patrol.bin', label: 'assets/carts/patrol.webp',
+        desc: 'Защити двор от тарелок' },
+    ],
+  },
+
   /* Форма кинескопа поверх зоны screen */
   screen: {
     radius: '10% / 13%',     // скругление углов (CSS border-radius)
@@ -147,13 +164,19 @@ window.TUBE_TV_CONFIG = {
     { type: 'archive', label: 'АРХИВ', live: true, items: [
       { id: '90stvintros_russia_ort', file: 'Russia, ORT, openings.mp4' },                     // ОРТ: заставки передач 90-х
       { id: '80stvshows_soviet_union_ct_ussr', file: 'Soviet Union, CT USSR, openings.mp4' },  // ЦТ СССР: заставки 80-х
-      { id: 'Vremya_24.02.89' },                                                               // программа «Время», 24 февраля 1989
+      { id: 'Vremya_24.02.89', file: 'VREMYA_24.02.89.mp4' },                                  // программа «Время», 24 февраля 1989
       { id: '90stvshows_russia_tv6', file: 'Russia, TV-6, openings.mp4' },                    // ТВ-6: заставки
     ] },
-    /* match — какие ролики брать из записи (по имени файла) */
+    /* file — имя файла в записи (массив — случайный); без file сайт спросит у архива список роликов, match — фильтр по имени.
+       Берём H.264-копии (.ia.mp4 — архив сам пережимает их для браузеров). */
     { type: 'archive', label: 'СТАРОЕ ВИДЕО', live: true, items: [
-      { id: 'ssr_vhs_1994' },                                                                  // «Сам себе режиссёр», кассета 1995 года
-      { id: 'soviet-animation', match: 'Перевал|Возвращение|Когда|Ванюша|Человек|Лысой|Тачанка|Машинк' },   // советская анимация
+      { id: 'ssr_vhs_1994', file: 'Сам Себе Режиссёр - Избранное (1994).mp4' },                // «Сам себе режиссёр», кассета 1994 года
+      { id: 'soviet-animation', file: [                                                         // советская анимация
+        'Soviet Animation/Перевал.ia.mp4', 'Soviet Animation/Возвращение.ia.mp4', 'Soviet Animation/Когда-то давно.ia.mp4',
+        'Soviet Animation/Ванюша и космический пират.ia.mp4', 'Soviet Animation/Человек ввоздухе..ia.mp4',
+        'Soviet Animation/Ночь на Лысой горе.ia.mp4', 'Soviet Animation/Тачанка (Tachanka) .ia.mp4',
+        'Soviet Animation/Познавательные мультики_ Машинка времени.ia.mp4',
+      ] },
     ] },
     { type: 'rutube', label: 'РЕКЛАМА', live: true, items: [
       '67ccb76315bd7012931c88b37927b0d2', 'f2ab607427ef7a1edce1419890911ddc', '10d1b6de46324f71b6ce078fdf3ffefb',
@@ -215,7 +238,7 @@ window.TUBE_TV_CONFIG = {
       'room-tone': null,      'street-day': null,  'birds': null,       'children': null,
       'street-evening': null, 'crickets': null,
       'frying': ['sounds/kitchen-fry-1.mp3', 'sounds/kitchen-fry-2.mp3'],
-      'siren': null,          'clock': null,       'door': null,
+      'siren': null,          'door': null,
       'dog': ['sounds/dog-1.mp3', 'sounds/dog-3.mp3', 'sounds/dog-5.mp3', 'sounds/dog-7.mp3'],
       'dog-far': ['sounds/dog-2.mp3', 'sounds/dog-4.mp3', 'sounds/dog-6.mp3', 'sounds/dog-8.mp3'],
       'thunder-1': 'sounds/thunder-1.mp3', 'thunder-2': 'sounds/thunder-2.mp3', 'thunder-3': 'sounds/thunder-3.mp3',
@@ -228,7 +251,7 @@ window.TUBE_TV_CONFIG = {
       'tv-on': null,          'tv-off': null,      'channel-click': null,
       'tv-testcard': null,    'tv-static': null,   'tv-morning': null,
       'lamp-click': null,
-      'egg-tamagotchi': null, 'egg-brickgame': null, 'egg-rubik': null,
+      'egg-deer': null,       'egg-brickgame': null, 'egg-rubik': null,
       'egg-bear': null,       'egg-cassette': null,   'egg-figurine': null,  'egg-teapot': null,
     },
     /* бесшовные петли: файл записан с запасом в 1 с по краям, период — в секундах */
@@ -255,7 +278,7 @@ window.TUBE_TV_CONFIG = {
     maxIntervalSec: 120,
     firstDelaySec: [25, 45],
     mustHappen: { frying: 170, siren: 300 },   // событие: не реже, чем раз в N секунд
-    weights: { frying: 3, siren: 1.6, clock: 1, door: 1, dog: 1.0, dogFar: 1.4, carWet: 1.2 },
+    weights: { frying: 3, siren: 1.6, door: 1, dog: 1.0, dogFar: 1.4, carWet: 1.2 },
   },
 
   /* ---------- ПАСХАЛКИ ----------
@@ -307,5 +330,26 @@ window.TUBE_TV_CONFIG = {
     phonesOff: 'Обычный стерео-звук (для колонок)',
     mute: 'Звук',
     ambience: 'фон',
+    segaZone: 'Приставка — вставить картридж',
+    segaZoneOn: 'Приставка — картриджи',
+    segaTitle: 'Картриджи',
+    segaClose: 'Закрыть',
+    segaNow: 'Сейчас в приставке: %s',
+    segaResume: 'Продолжить',
+    segaReset: 'Сначала',
+    segaOff: 'Выключить приставку',
+    segaOwn: 'Свой картридж…',
+    segaOwnDesc: 'Файл .md, .bin, .gen, .smd или .zip — можно перетащить',
+    segaKeys: '<b>Клавиатура:</b> <kbd>←</kbd><kbd>↑</kbd><kbd>↓</kbd><kbd>→</kbd> крестовина · <kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> кнопки A B C · <kbd>Q</kbd><kbd>W</kbd><kbd>E</kbd> X Y Z · <kbd>Enter</kbd> Start · <kbd>Esc</kbd> это меню<br><b>Геймпад:</b> подключите и нажмите любую кнопку. Крестовина или стик, три кнопки — A B C, Start, кнопка «домой» — меню',
+    segaPadOn: 'Геймпад: %s',
+    segaPadOff: 'Геймпад не найден — подключите и нажмите кнопку',
+    segaPadGeneric: 'подключён',
+    segaHint: 'Стрелки — крестовина, A S D — кнопки, Enter — Start. Esc — меню картриджей',
+    segaHintTouch: 'Крестовина слева, кнопки справа. ☰ — меню картриджей',
+    segaLoading: 'ЗАГРУЗКА…',
+    segaFail: 'Картридж не запустился. Попробуйте другой файл',
+    segaBadFile: 'Это не картридж Mega Drive: нужен файл .md, .bin, .gen, .smd или .zip',
+    segaScreenFail: 'КАРТРИДЖ НЕ ЧИТАЕТСЯ',
+    segaScreenFail2: 'выберите другой — Esc',
   },
 };

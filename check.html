@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tube TV — проверка эфира</title>
+<style>
+  body { margin: 0; padding: 24px; background: #15100b; color: #fbe9cf; font: 15px/1.45 system-ui, sans-serif; }
+  h1 { font-weight: 500; font-size: 22px; margin: 0 0 6px; }
+  p { margin: 6px 0 14px; opacity: .8; max-width: 720px; }
+  table { border-collapse: collapse; width: 100%; max-width: 980px; }
+  td, th { text-align: left; padding: 7px 10px; border-bottom: 1px solid rgba(255,214,160,.14); vertical-align: top; }
+  th { opacity: .6; font-weight: 500; font-size: 13px; }
+  .ok { color: #9dffb7; } .bad { color: #ff9a8a; } .wait { color: #e9b46a; }
+  .u { opacity: .55; font-size: 12px; word-break: break-all; }
+  button { margin-top: 18px; padding: 10px 16px; border-radius: 10px; border: 1px solid rgba(255,214,160,.3); background: rgba(255,214,160,.08); color: inherit; font: inherit; cursor: pointer; }
+  textarea { width: 100%; max-width: 980px; height: 160px; margin-top: 10px; background: #0d0906; color: #ddd; border: 1px solid #443; border-radius: 8px; padding: 8px; font: 12px/1.4 ui-monospace, monospace; }
+  video { position: absolute; width: 2px; height: 2px; opacity: 0; pointer-events: none; }
+</style>
+</head>
+<body>
+<h1>Проверка эфира</h1>
+<p>Страница сама пробует каждую запись архива и плеер RuTube так же, как это делает телевизор, и показывает, что именно не отвечает. Нажмите «Скопировать отчёт» и пришлите его.</p>
+<table id="t"><tr><th>Источник</th><th>Запись</th><th>Метаданные</th><th>Видео (CORS)</th><th>Видео (обычно)</th><th>Время</th></tr></table>
+<button id="copy" type="button">Скопировать отчёт</button>
+<textarea id="out" readonly></textarea>
+<script src="config.js"></script>
+<script>
+(async () => {
+  const CFG = window.TUBE_TV_CONFIG, T = document.getElementById('t'), rows = [];
+  const cell = (tr, i, txt, cls) => { const td = tr.children[i]; td.textContent = txt; td.className = cls || ''; };
+  const row = (src, name, url) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${src}</td><td>${name}<div class="u">${url || ''}</div></td><td>—</td><td>—</td><td>—</td><td>—</td>`;
+    T.appendChild(tr); return tr;
+  };
+  const enc = n => n.split('/').map(encodeURIComponent).join('/');
+  const tryVideo = (url, cors) => new Promise(res => {
+    const v = document.createElement('video'); v.muted = true; v.playsInline = true; v.preload = 'auto';
+    if (cors) v.crossOrigin = 'anonymous';
+    const t0 = performance.now(); let done = false;
+    const fin = r => { if (done) return; done = true; try { v.pause(); v.removeAttribute('src'); v.load(); v.remove(); } catch (_) {} res(Object.assign({ ms: Math.round(performance.now() - t0) }, r)); };
+    v.addEventListener('loadeddata', () => fin({ ok: true, w: v.videoWidth, h: v.videoHeight, dur: Math.round(v.duration) }));
+    v.addEventListener('error', () => fin({ ok: false, code: v.error && v.error.code, msg: v.error && v.error.message }));
+    setTimeout(() => fin({ ok: false, code: 'timeout' }), 45000);
+    document.body.appendChild(v); v.src = url; v.load();
+  });
+  const report = [];
+  const log = (...a) => report.push(a.join(' '));
+  log('Tube TV v' + CFG.version, new Date().toISOString());
+  log(navigator.userAgent);
+  for (const ch of CFG.channels) {
+    if (ch.type !== 'archive') continue;
+    for (const it of ch.items) {
+      const files = [].concat(it.file || []);
+      const tr = row(ch.label, it.id, '');
+      // метаданные
+      let meta = null;
+      try {
+        const r = await fetch(`https://archive.org/metadata/${encodeURIComponent(it.id)}`, { mode: 'cors' });
+        const j = await r.json(); meta = (j.files || []).filter(f => /\.mp4$/i.test(f.name)).map(f => f.name);
+        cell(tr, 2, `ок, ${meta.length} mp4`, 'ok');
+      } catch (e) { cell(tr, 2, 'нет: ' + (e.message || e), 'bad'); }
+      const name = files[0] || (meta && meta[0]);
+      if (!name) { cell(tr, 3, 'нет файла', 'bad'); log(ch.label, it.id, 'metadata', meta ? 'ok' : 'fail', 'no file'); continue; }
+      const url = `https://archive.org/download/${encodeURIComponent(it.id)}/${enc(name.normalize('NFC'))}`;
+      tr.children[1].querySelector('.u').textContent = url;
+      cell(tr, 3, 'проверяю…', 'wait');
+      const a = await tryVideo(url, true);
+      cell(tr, 3, a.ok ? `ок ${a.w}×${a.h}, ${a.dur} с` : `ошибка ${a.code}`, a.ok ? 'ok' : 'bad');
+      cell(tr, 4, 'проверяю…', 'wait');
+      const b = a.ok ? { ok: true, ms: 0, skip: true } : await tryVideo(url, false);
+      cell(tr, 4, b.skip ? 'не нужно' : b.ok ? `ок ${b.w}×${b.h}` : `ошибка ${b.code}`, b.ok ? 'ok' : 'bad');
+      cell(tr, 5, `${a.ms} мс` + (b.skip ? '' : ` / ${b.ms} мс`));
+      log(ch.label, it.id, 'meta', meta ? 'ok' : 'fail', 'cors', a.ok ? 'ok' : 'err ' + a.code, a.ms + 'ms', 'plain', b.skip ? '-' : b.ok ? 'ok' : 'err ' + b.code, url);
+    }
+  }
+  // RuTube: ждём player:ready от встроенного плеера
+  for (const ch of CFG.channels) {
+    if (ch.type !== 'rutube') continue;
+    const id = ch.items[0], tr = row(ch.label, id, `https://rutube.ru/play/embed/${id}/`);
+    cell(tr, 3, 'проверяю…', 'wait');
+    const f = document.createElement('iframe'); f.width = 320; f.height = 180; f.style.cssText = 'position:absolute;left:-9999px';
+    f.src = `https://rutube.ru/play/embed/${id}/`;
+    const t0 = performance.now();
+    const r = await new Promise(res => {
+      const h = e => { if (e.source !== f.contentWindow) return; let m = e.data; try { m = typeof m === 'string' ? JSON.parse(m) : m; } catch (_) { return; }
+        if (m && m.type === 'player:ready') { removeEventListener('message', h); res({ ok: true }); } };
+      addEventListener('message', h); document.body.appendChild(f);
+      setTimeout(() => { removeEventListener('message', h); res({ ok: false }); }, 25000);
+    });
+    f.remove();
+    cell(tr, 3, r.ok ? 'плеер ответил' : 'плеер молчит', r.ok ? 'ok' : 'bad'); cell(tr, 4, '—'); cell(tr, 5, Math.round(performance.now() - t0) + ' мс');
+    log(ch.label, id, 'rutube', r.ok ? 'ok' : 'silent');
+  }
+  const out = document.getElementById('out'); out.value = report.join('\n');
+  document.getElementById('copy').addEventListener('click', async () => { try { await navigator.clipboard.writeText(out.value); } catch (_) { out.select(); } });
+})();
+</script>
+</body>
+</html>

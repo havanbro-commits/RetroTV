@@ -77,6 +77,10 @@
 
     <!-- 5. Интерфейс -->
     <div class="ui">
+      <button id="roomBtn" class="seat room" type="button" aria-label="Другая комната">
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M4 20V6l8-3 8 3v14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M9 20v-6h6v6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+        <span></span>
+      </button>
       <button id="seatBtn" class="seat" type="button" aria-pressed="false">
         <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M6 11V7.5A2.5 2.5 0 0 1 8.5 5h7A2.5 2.5 0 0 1 18 7.5V11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M4.5 11.5a1.5 1.5 0 0 1 3 0V14h9v-2.5a1.5 1.5 0 0 1 3 0V17a1 1 0 0 1-1 1h-13a1 1 0 0 1-1-1z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M7 18v2M17 18v2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
         <span class="long"></span><span class="short"></span>
@@ -85,7 +89,6 @@
         <label class="mx"><span>ТВ</span><input id="mxTv" type="range" min="0" max="1" step="0.01" aria-label="Громкость телевизора"></label>
         <label class="mx"><span>Комната</span><input id="mxRoom" type="range" min="0" max="1" step="0.01" aria-label="Громкость комнаты: улица, кухня, погода"></label>
       </div>
-      <button id="rtxBtn" class="phones rtx" type="button" aria-pressed="true" aria-label="RTX: блики и преломления в хрустале" title="RTX — блики и преломления в хрустале">RTX</button>
       <button id="phonesBtn" class="phones" type="button" aria-pressed="true" aria-label="Объёмный звук для наушников">
         <svg viewBox="0 0 24 24" width="21" height="21" aria-hidden="true"><path d="M4 15v-3a8 8 0 0 1 16 0v3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><rect x="3" y="14" width="4.5" height="6.5" rx="1.6" fill="currentColor"/><rect x="16.5" y="14" width="4.5" height="6.5" rx="1.6" fill="currentColor"/></svg>
       </button>

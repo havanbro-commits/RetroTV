@@ -242,10 +242,15 @@ body.evening .hot.evening-only { pointer-events: auto; }
 .puppet.anim .side { opacity: 1; }
 .puppet.no-sprite .sprite, .puppet.no-sprite .side, .puppet.no-sprite .glow-sprite, .puppet.no-sprite .reel, .puppet.no-sprite .sheen { opacity: 0 !important; transition: none; }
 .puppet .glow-sprite {
-  opacity: 0; transition: opacity .4s ease;
-  filter: drop-shadow(0 0 calc(var(--u) * 1.6) rgba(var(--warm), .95)) drop-shadow(0 0 calc(var(--u) * 6) rgba(var(--warm), .6)) brightness(1.14);
+  opacity: 0; transition: opacity .3s ease;
+  filter: brightness(1.05) contrast(1.02);
 }
+/* наведение: предмет не «светится» — его будто тронули: чуть приподнялся, появилась тень на полке */
 .puppet.hover .glow-sprite { opacity: 1; }
+.puppet .body { transition: transform .35s cubic-bezier(.3, 1.3, .4, 1); }
+.puppet.hover:not(.anim) .body { transform: translateY(-1.5%) rotateZ(-.5deg); }
+.puppet.hover:not(.anim) .plate { opacity: 1; }
+.puppet.hover:not(.anim) .shadow { opacity: .5; }
 .puppet.anim .glow-sprite { opacity: 0; transition: opacity .15s; }
 .hot.egg.active .halo { opacity: 0 !important; }
 .puppet .sheen {
@@ -274,8 +279,7 @@ body.evening .hot.evening-only { pointer-events: auto; }
 .cubie i { position: absolute; inset: 0; background: #17120e; transform-style: preserve-3d; }
 .cubie b { position: absolute; inset: 8%; border-radius: 16%; }
 .hot.egg .crop { display: none; }
-.hot.egg .halo { inset: -25%; }
-.hot.egg:hover .halo, .hot.egg.active .halo { opacity: .55; }
+.hot.egg .halo { display: none; }
 
 /* ---------- подпись ---------- */
 .caption {
@@ -410,8 +414,6 @@ body.evening .hot.evening-only { pointer-events: auto; }
 .phones { opacity: .55; }
 .phones.on { opacity: 1; color: #f2c47e; border-color: rgba(255, 214, 160, .45); }
 .phones:focus-visible { outline: 2px solid rgba(255, 214, 160, .8); outline-offset: 2px; }
-.phones.rtx { font: 700 10px/1 ui-monospace, Menlo, monospace; letter-spacing: .5px; }
-.phones.rtx[aria-pressed="true"] { opacity: 1; color: #9dffb7; border-color: rgba(157, 255, 183, .45); text-shadow: 0 0 6px rgba(120, 255, 160, .55); }
 .mute:active { transform: scale(.94); }
 .mute .cross { display: none; }
 .mute[aria-pressed="true"] .cross { display: inline; }
@@ -688,3 +690,15 @@ body.reduced .boot.done .boot-line { animation: none; }
   .sp-abc { gap: 8px; }
   .sp-start { left: auto; right: max(16px, env(safe-area-inset-right)); transform: none; bottom: calc(max(26px, env(safe-area-inset-bottom)) + 112px); }
 }
+/* на закате свет живой, готовой подложки нет — предмет на наведении остаётся на месте */
+body.time-sunset.weather-clear .puppet.hover:not(.anim) .body { transform: none; }
+body.time-sunset.weather-clear .puppet.hover:not(.anim) .plate { opacity: 0; }
+body.time-sunset.weather-clear .puppet.hover:not(.anim) .shadow { opacity: 0; }
+
+/* переключение комнат */
+.seat.room { gap: 7px; }
+.seat.room span { font-size: 16px; }
+@media (max-width: 560px) { .seat.room span { display: none; } }
+/* светящиеся предметы (комната без WebGL) */
+.glow-item { position: absolute; pointer-events: none; mix-blend-mode: screen; opacity: 0; transition: opacity var(--xfade, 2600ms) ease;
+  filter: drop-shadow(0 0 calc(var(--u) * 3) rgba(140, 255, 180, .55)); }

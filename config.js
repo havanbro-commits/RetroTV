@@ -7,7 +7,7 @@
    и вставьте результат вместо блока zones ниже.
    ============================================================ */
 window.TUBE_TV_CONFIG = {
-  version: '0.9',
+  version: '0.10',
   image: { width: 1536, height: 1024 },
 
   /* Сцены. Время суток переключает торшер (timeCycle), погоду — клик по окну
@@ -166,7 +166,9 @@ window.TUBE_TV_CONFIG = {
       { id: '80stvshows_soviet_union_ct_ussr', file: 'Soviet Union, CT USSR, openings.mp4' },  // ЦТ СССР: заставки 80-х
       { id: 'Vremya_24.02.89', file: 'VREMYA_24.02.89.mp4' },                                  // программа «Время», 24 февраля 1989
       { id: '90stvshows_russia_tv6', file: 'Russia, TV-6, openings.mp4' },                    // ТВ-6: заставки
-    ] },
+    ],
+      /* архив не отвечает (заблокирован, лёг, медленный) — канал временно идёт с RuTube, архив пробуется снова через 5 минут */
+      fallback: { type: 'rutube', items: ['b93247023f3b7d3f5ed96b3386d98c30', 'd987dbd73d9b1b1c346cc787fc651292', '73b59f96cedb1e12b39f1b5afc4be164', 'd02c28972a264df1bc4725478bbf8635'] } },
     /* file — имя файла в записи (массив — случайный); без file сайт спросит у архива список роликов, match — фильтр по имени.
        Берём H.264-копии (.ia.mp4 — архив сам пережимает их для браузеров). */
     { type: 'archive', label: 'СТАРОЕ ВИДЕО', live: true, items: [
@@ -177,7 +179,8 @@ window.TUBE_TV_CONFIG = {
         'Soviet Animation/Ночь на Лысой горе.ia.mp4', 'Soviet Animation/Тачанка (Tachanka) .ia.mp4',
         'Soviet Animation/Познавательные мультики_ Машинка времени.ia.mp4',
       ] },
-    ] },
+    ],
+      fallback: { type: 'rutube', items: ['f37aa7952686316042d76aa383dd77d2', '5538298c21b7c3f993c3b94a3e8553a2', 'd3e49d694acdfc8548a7d290d08509fe', '67ccb76315bd7012931c88b37927b0d2'] } },
     { type: 'rutube', label: 'РЕКЛАМА', live: true, items: [
       '67ccb76315bd7012931c88b37927b0d2', 'f2ab607427ef7a1edce1419890911ddc', '10d1b6de46324f71b6ce078fdf3ffefb',
       'a4b1f12827f2f4704c48904d4211d183', '8a28887d831a4e40e72e43466c586fe9', '53975635b9b8cd4fc8507330c0a5d1e0',
@@ -251,8 +254,10 @@ window.TUBE_TV_CONFIG = {
       'tv-on': null,          'tv-off': null,      'channel-click': null,
       'tv-testcard': null,    'tv-static': null,   'tv-morning': null,
       'lamp-click': null,
-      'egg-deer': null,       'egg-brickgame': null, 'egg-rubik': null,
-      'egg-bear': null,       'egg-cassette': null,   'egg-figurine': null,  'egg-teapot': null,
+      'egg-deer': 'sounds/eggs/egg-deer.mp3',         'egg-brickgame': 'sounds/eggs/egg-brickgame.mp3',
+      'egg-rubik': 'sounds/eggs/egg-rubik.mp3',       'egg-rubik-turn': 'sounds/eggs/egg-rubik-turn.mp3',
+      'egg-bear': 'sounds/eggs/egg-bear.mp3',         'egg-cassette': 'sounds/eggs/egg-cassette.mp3',
+      'egg-figurine': 'sounds/eggs/egg-figurine.mp3', 'egg-teapot': 'sounds/eggs/egg-teapot.mp3',
     },
     /* бесшовные петли: файл записан с запасом в 1 с по краям, период — в секундах */
     seamless: { 'rain-wash-light': 24, 'rain-wash-heavy': 24, 'rain-leaves': 24, 'rain-puddles': 24,
@@ -324,8 +329,6 @@ window.TUBE_TV_CONFIG = {
     drapeNow: ['Окно закрыли — улица стала глуше, слышно только стекло', 'Окно приоткрыли', 'Окно открыли настежь'],
     rainHint: 'Пошёл дождь. Окно можно закрыть — щёлкните по шторе слева от тюля',
     tapForSound: 'Браузер запустил эфир без звука — нажмите на экран телевизора',
-    rtxOn: 'RTX включён: блики и преломления в хрустале',
-    rtxOff: 'RTX выключен',
     phonesOn: 'Объёмный звук для наушников включён',
     phonesOff: 'Обычный стерео-звук (для колонок)',
     mute: 'Звук',
@@ -353,3 +356,74 @@ window.TUBE_TV_CONFIG = {
     segaScreenFail2: 'выберите другой — Esc',
   },
 };
+
+/* ==========================================================================
+   КОМНАТЫ. Первая («зал» со стенкой) описана выше целиком. Остальные — набор
+   отличий: своя картинка и её размер, свои зоны, сцены и раскладка.
+   Переключение — кнопка «Комната» вверху или ?room=<id> в адресе; выбор запоминается.
+   У второй комнаты пока нет карты глубины (geo) — солнце и фонарь не трассируются,
+   сцены переключаются готовыми картинками; дождь, свет экрана, мигалка, пыль — работают.
+   ========================================================================== */
+window.TUBE_TV_ROOMS = {
+  hall:    { title: 'Зал',     short: 'Зал' },
+  bedroom: { title: 'Комната', short: 'Комната', config: {
+    image: { width: 2159, height: 728 },
+    backgrounds: {
+      day:      { image: 'assets/bedroom/room-day.webp',      video: null, windowVideo: null },
+      sunset:   { image: 'assets/bedroom/room-sunset.webp',   video: null, windowVideo: null },
+      evening:  { image: 'assets/bedroom/room-evening.webp',  video: null, windowVideo: null },
+      overcast: { image: 'assets/bedroom/room-overcast.webp', video: null, windowVideo: null },
+      storm:    { image: 'assets/bedroom/room-storm.webp',    video: null, windowVideo: null },
+      night:    { image: 'assets/bedroom/room-night.webp',    video: null, windowVideo: null },
+    },
+    startMode: 'evening',
+    layout: {
+      desktop: { focus: { x: 55, y: 52 }, keepVisible: { x: 24, y: 8, w: 62, h: 84 } },
+      mobile:  { focus: { x: 56, y: 55 }, keepVisible: { x: 44, y: 25, w: 30, h: 60 } },
+      mobileMaxAspect: 1.0,
+    },
+    zones: {
+      screen:      { x: 50.58, y: 40.11, w: 7.64,  h: 17.17 },
+      tvBody:      { x: 50.12, y: 37.36, w: 11.02, h: 22.39 },
+      power:       { x: 58.64, y: 53.85, w: 0.93,  h: 2.47 },
+      channelKnob: { x: 58.68, y: 40.80, w: 1.20,  h: 3.57 },
+      volumeKnob:  { x: 58.64, y: 45.47, w: 1.02,  h: 3.02 },
+      lamp:        { x: 10.65, y: 20.60, w: 7.41,  h: 15.10 },
+      window:      { x: 27.79, y: 0.00,  w: 18.99, h: 52.20 },
+      drape:       { x: 21.07, y: 0.00,  w: 6.72,  h: 68.70 },
+      siren:       { x: 27.79, y: 0.00,  w: 18.99, h: 52.20 },
+      dust:        { x: 20.84, y: 0.00,  w: 30.10, h: 82.40 },
+      glow:        { x: 41.69, y: 20.60, w: 27.79, h: 61.80 },
+      sega:        { x: 69.25, y: 81.73, w: 12.97, h: 14.42 },
+    },
+    seat: { zone: 'tvBody', fill: 0.62, durationMs: 1500 },
+    closeup: null,
+    room: null,                                // без карты глубины: сцены — картинками
+    eggs: [],
+    /* светящиеся предметы без WebGL: вырезка со свечением поверх картинки, сила — по сцене */
+    glows: [
+      { id: 'deer', image: 'assets/bedroom/deer-glow.png', sprite: [1312, 346, 72, 92],
+        scenes: { evening: 0.6, night: 1.0, storm: 0.25, overcast: 0.12 } },
+    ],
+    text: {
+      intro: 'Вечер. Включите телевизор — кнопка внизу справа, под динамиком.',
+      afterOn: 'Верхняя ручка — каналы, нижняя — громкость. Настольная лампа — день, закат, вечер, ночь. Окно — погода. Sega на полу — поиграть.',
+      lamp: { day: 'Лампа — вернуть день', sunset: 'Лампа — дождаться заката', evening: 'Лампа — дождаться вечера', night: 'Лампа — погасить: пусть светит только телевизор' },
+    },
+    /* звук: окно впереди слева, двор — за ним */
+    audio: { azimuth: { street: -22, window: -24 } },
+  } },
+};
+(function () {
+  const C = window.TUBE_TV_CONFIG, R = window.TUBE_TV_ROOMS;
+  let id = 'hall';
+  try { id = new URLSearchParams(location.search).get('room') || localStorage.getItem('tubetv.place') || 'hall'; } catch (_) {}
+  if (!R[id]) id = 'hall';
+  C.roomId = id;
+  const ov = R[id].config || {};
+  for (const [k, v] of Object.entries(ov)) {
+    if (v && typeof v === 'object' && !Array.isArray(v) && C[k] && typeof C[k] === 'object' && !Array.isArray(C[k]) && ['text', 'audio', 'seat', 'light'].includes(k)) Object.assign(C[k], v);
+    else C[k] = v;
+  }
+})();
+

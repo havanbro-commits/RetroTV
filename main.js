@@ -266,6 +266,7 @@ float foliage(vec3 P, vec3 s, float tw, float detail){
   },
 
   init() {
+    if (!CFG.room || !CFG.room.geo) return Promise.reject(new Error('у комнаты нет карты глубины'));
     const c = document.createElement('canvas');
     c.className = 'room-gl'; c.setAttribute('aria-hidden', 'true');
     const gl = c.getContext('webgl', { alpha: false, antialias: false, premultipliedAlpha: false, preserveDrawingBuffer: true, powerPreference: 'high-performance' });
@@ -294,9 +295,10 @@ uniform float uNight;       // ночь
 uniform vec4 uWin;          // окно: x0, y0, x1, y1 (px)
 uniform vec3 uAmb, uSunC, uWinC, uLamp;
 uniform float uPhys, uSunK, uShaftK, uAmp, uBillow, uPhase, uRain, uSlant;
-uniform float uGlow, uRtx, uLampL;   // свечение фосфорного оленя, «трассировка» в хрустале, торшер
+uniform float uGlow, uLampL;         // свечение фосфорного оленя, торшер
 uniform vec3 uTvC;                   // свет экрана (линейный цвет × яркость)
 uniform float uFlash;                // молния: вспышка неба за окном
+uniform vec4 uSiren;                 // мигалка во дворе: z машины (м), красный, синий, высота
 ${this.glsl()}
 float laceAt(vec2 uv, float lod){
 ${lodExt ? '  return texture2DLodEXT(uLace, uv, lod).r;' : '  return texture2D(uLace, uv, lod - 2.0).r;'}
@@ -390,63 +392,26 @@ float rivulets(vec2 H, float t){
   return s;
 }
 
-/* «RTX»: свет от светящейся статуэтки (и от экрана, и от торшера) проходит сквозь хрусталь.
-   Хрусталь — маска из фото (g), нормаль грани — градиент яркости; каждый канал
-   преломляется чуть по-своему (дисперсия), сквозь бокалы на заднюю стенку падают каустики. */
-const vec2 DEER = vec2(405.0, 338.0), TVP = vec2(728.0, 446.0), LAMPP = vec2(165.0, 300.0);
+/* Фосфорные олени в серванте: статуэтка светится сама — ровный холодный зелёно-белый свет,
+   как у советских фосфорных фигурок; рельеф виден — где слой толще, ярче. Вокруг — мягкий ореол
+   в стекле витрины и отсвет на соседних бокалах и полке. */
+const vec2 DEER = vec2(405.0, 338.0);
 const vec3 PHOS = vec3(0.30, 1.0, 0.42);
-vec2 edgeN(vec2 uq){
-  vec2 e = 1.0 / uImg;
-  float lx = dot(texture2D(uStorm, uq + vec2(e.x, 0.0)).rgb - texture2D(uStorm, uq - vec2(e.x, 0.0)).rgb, vec3(0.333));
-  float ly = dot(texture2D(uStorm, uq + vec2(0.0, e.y)).rgb - texture2D(uStorm, uq - vec2(0.0, e.y)).rgb, vec3(0.333));
-  return vec2(lx, ly);
-}
-vec3 glints(vec2 p, vec2 uq, float crys, vec2 L, float reach, vec2 gN){
-  vec2 toL = L - p; float d = length(toL); vec2 dir = toL / max(d, 1.0);
-  float gl = length(gN);
-  float facing = gl > 0.002 ? abs(dot(gN / gl, dir)) : 0.0;
-  float fall = 1.0 / (1.0 + d * d / (reach * reach));
-  // стеклянные полки между источником и бокалом гасят часть света
-  float shelves = abs(floor((p.y - 266.0) / 105.0) - floor((L.y - 266.0) / 105.0));
-  fall *= pow(0.55, min(shelves, 3.0));
-  vec2 e = dir / uImg * 1.6;
-  vec3 cm = vec3(texture2D(uGeo, uq - e).g, crys, texture2D(uGeo, uq + e).g);   // призма: R и B со сдвигом
-  cm = cm * cm;
-  float tw = 0.65 + 0.35 * sin(uTime * 1.7 + p.x * 0.37 + p.y * 0.21) * sin(uTime * 0.6 + p.y * 0.13);
-  return cm * pow(facing, 4.0) * fall * tw * smoothstep(0.004, 0.04, gl);
-}
-vec3 crystal(vec3 c, vec2 p, vec2 uq, vec4 gx, float gid){
-  vec3 alb = lin(texture2D(uStorm, uq).rgb);
-  float al = dot(alb, vec3(0.2126, 0.7152, 0.0722));
+vec3 phosphor(vec3 c, vec2 p, vec2 uq, vec4 gx, float gid){
+  float g = uGlow, m = gx.b;
   vec2 dp = (p - DEER) / vec2(40.0, 46.0);
   float r2 = dot(dp, dp);
-  float g = uGlow;
-  // сама статуэтка: холодный зелёный фосфор, еле заметный; рельеф виден — толще слой, ярче
-  c += PHOS * gx.b * g * (0.0075 + 0.003 * uRtx) * (0.35 + 6.0 * al);
-  // ореол в стекле витрины и свет на соседних предметах
-  float near = 1.0 / (1.0 + r2 * 2.6);
-  bool cab = gid > 3.5 && gid < 4.5;
-  c += PHOS * g * exp(-r2 * 1.8) * 0.0016 * (1.0 + 1.2 * uRtx);
-  if (cab) c += alb * PHOS * g * near * (0.05 + 0.08 * uRtx);
-  if (uRtx > 0.001) {
-    float crys = gx.g;
-    vec2 gN = crys > 0.05 ? edgeN(uq) : vec2(0.0);
-    vec3 add = vec3(0.0);
-    if (crys > 0.05) {
-      add += glints(p, uq, crys, DEER, 105.0, gN) * PHOS * g * 0.15;
-      add += glints(p, uq, crys, TVP, 480.0, gN) * uTvC * 0.22;
-      add += glints(p, uq, crys, LAMPP, 360.0, gN) * vec3(1.0, 0.72, 0.42) * uLampL * 0.035;
-    } else if (cab && g > 0.01) {
-      // каустики: свет оленя прошёл сквозь хрусталь на пути к этой точке
-      vec2 toL = DEER - p; float d = length(toL);
-      float acc = 0.0;
-      for (int i = 1; i <= 8; i++) { float k = float(i) / 9.0; acc += texture2D(uGeo, (p + toL * k) / uImg).g * (1.0 - k * 0.5); }
-      acc = acc / 6.0;
-      float ca = acc * acc * (0.6 + 0.4 * sin(uTime * 0.9 + d * 0.11));
-      add += alb * PHOS * g * ca * (1.0 / (1.0 + d * d / 7000.0)) * 1.2;
-    }
-    c += add * uRtx;
+  if (m > 0.002) {
+    vec3 alb = lin(texture2D(uStorm, uq).rgb);
+    float al = dot(alb, vec3(0.2126, 0.7152, 0.0722));
+    // сама статуэтка: светится ровно, рельеф и грани — по яркости фото
+    vec3 E = vec3(0.34, 0.60, 0.42) * (0.55 + 0.75 * smoothstep(0.0, 0.22, al));
+    c = mix(c, c * 0.35 + E, m * g);
   }
+  // ореол в стекле и свет на соседних предметах (отражение в бокалах, на полке)
+  bool cab = gid > 3.5 && gid < 4.5;
+  c += PHOS * g * exp(-r2 * 1.6) * 0.012 * (1.0 - m);
+  if (cab) { vec3 alb = lin(texture2D(uStorm, uq).rgb); c += alb * PHOS * g * (0.16 / (1.0 + r2 * 2.2)) * (1.0 - m); }
   return c;
 }
 
@@ -507,7 +472,7 @@ void main(){
   // ---- ночь: торшер погашен; синева из окна, натриевый фонарь во дворе светит снизу сквозь тюль ----
   if (uNight > 0.001) {
     vec3 alb = lin(texture2D(uStorm, uq).rgb);
-    vec3 c = alb * vec3(0.07, 0.085, 0.14);
+    vec3 c = alb * vec3(0.095, 0.11, 0.175);
     if (room) {
       vec3 lp = vec3(XR + 7.5, -3.6, -3.3);                 // фонарь: 7,5 м от окна, ниже подоконника
       vec3 d = lp - P; float dist = length(d);
@@ -519,8 +484,23 @@ void main(){
     col += uNight * gam(c);
   }
   col *= shade;
+  // ---- машина с мигалкой во дворе: красный и синий свет проходят сквозь тюль и ложатся на стены
+  //      рисунком кружева; машина едет — пятна ползут по комнате (та же трассировка, что у солнца) ----
+  if (uSiren.y + uSiren.z > 0.001) {
+    vec3 sc = vec3(1.0, 0.10, 0.06) * uSiren.y + vec3(0.30, 0.55, 1.0) * 1.6 * uSiren.z;   // синий на тёмном дереве виден хуже — чуть ярче
+    if (room && winM < 0.5) {
+      vec3 lp = vec3(XR + 7.0, uSiren.w, uSiren.x);
+      vec3 d = lp - P; float dist = length(d);
+      float Ls = throughWindow(P, N, d / dist, 0.0) * 2400.0 / (dist * dist);
+      vec3 alb = lin(uW.x * texture2D(uDay, uq).rgb + (1.0 - uW.x) * texture2D(uStorm, uq).rgb);
+      col = gam(lin(col) + alb * sc * Ls);
+    }
+    // сам тюль: подсвечен снаружи там, где машина; тем ярче, чем ближе она к окну
+    float cz = clamp(1.0 - abs(uSiren.x + 3.1) / 7.0, 0.0, 1.0);
+    col += winM * sc * 0.2 * cz * cz * (0.3 + 0.7 * smoothstep(0.1, 0.9, yn));
+  }
   // ---- фосфорный олень в серванте и хрусталь вокруг ----
-  if (uGlow > 0.002 || (uRtx > 0.001 && (dot(uTvC, vec3(1.0)) > 0.002 || uLampL > 0.01))) col = gam(crystal(lin(col), p, uq, gx, gid));
+  if (uGlow > 0.002) col = gam(phosphor(lin(col), p, uq, gx, gid));
   // ---- дождь ----
   if (uRain > 0.001) {
     vec3 cd = vec3((p.x - CX) / FOC, -(p.y - CY) / FOC, -1.0);
@@ -614,7 +594,7 @@ void main(){
     gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
     const U = (prog, names) => { const o = {}; for (const n of names) o[n] = gl.getUniformLocation(prog, n); return o; };
     this.u = U(this.prog, ['uDayP', 'uHole', 'uDay', 'uEve', 'uOver', 'uStorm', 'uSun', 'uGeo', 'uLace', 'uShaft', 'uW', 'uNight', 'uImg', 'uWin', 'uAmb', 'uSunC', 'uWinC', 'uLamp',
-      'uPhys', 'uSunK', 'uShaftK', 'uSunD', 'uGust', 'uAmp', 'uBillow', 'uPhase', 'uTime', 'uRain', 'uSlant', 'uGlow', 'uRtx', 'uLampL', 'uTvC', 'uFlash']);
+      'uPhys', 'uSunK', 'uShaftK', 'uSunD', 'uGust', 'uAmp', 'uBillow', 'uPhase', 'uTime', 'uRain', 'uSlant', 'uGlow', 'uLampL', 'uTvC', 'uFlash', 'uSiren']);
     this.uS = U(this.progS, ['uGeo', 'uImg', 'uTime', 'uSunD', 'uGust']);
     gl.useProgram(this.progS); gl.uniform2f(this.uS.uImg, IMG_W, IMG_H); gl.uniform1i(this.uS.uGeo, 5);
     gl.useProgram(this.prog); gl.uniform2f(this.u.uImg, IMG_W, IMG_H);
@@ -813,9 +793,10 @@ void main(){
     if (Camera.seated && !stageEl.classList.contains('moving') && !state.fxT0 && Close.covers()) { this.dirty = true; return; }
     const gl = this.gl, u = this.u, c = this.cur;
     const phys = c.w[0] > 0.001 && c.s > 0.001, night = c.n > 0.001;
-    const glow = Deer.level(c), rtx = Deer.rtxK(t), tvc = Deer.tvLight();
-    const sparkle = rtx > 0.001 && (glow > 0.01 || tvc[0] + tvc[1] + tvc[2] > 0.002 || c.w[1] > 0.05);
-    const live = phys || night || sparkle || (Weather.level || 0) > 0.01 || Weather.flash(t) > 0;   // свет живой: тюль, листва, блики, дождь
+    const glow = Deer.level(c), tvc = Deer.tvLight();
+    const sparkle = false;
+    const sir = Light.sirenGL;
+    const live = phys || night || sparkle || (Weather.level || 0) > 0.01 || Weather.flash(t) > 0 || !!sir;   // свет живой: тюль, листва, дождь, мигалка
     const full = this.dirty || this.busy();
     if (!full) {
       if (Camera.winHidden && !stageEl.classList.contains('moving') && !live) return;
@@ -853,8 +834,9 @@ void main(){
     gl.uniform1f(u.uPhase, this.wind.phase);
     gl.uniform1f(u.uTime, time);
     gl.uniform1f(u.uRain, Weather.level || 0);
-    gl.uniform1f(u.uGlow, glow); gl.uniform1f(u.uRtx, rtx); gl.uniform1f(u.uLampL, c.w[1]); gl.uniform3fv(u.uTvC, tvc);
+    gl.uniform1f(u.uGlow, glow); gl.uniform1f(u.uLampL, c.w[1]); gl.uniform3fv(u.uTvC, tvc);
     gl.uniform1f(u.uFlash, Weather.flash(t));
+    if (sir) gl.uniform4f(u.uSiren, sir.z, sir.r, sir.b, sir.y); else gl.uniform4f(u.uSiren, 0, 0, 0, 0);
     gl.uniform1f(u.uSlant, 0.12 + Wind.w * 0.25);
     const W = this.c.width, H = this.c.height, kx = W / IMG_W;
     gl.viewport(0, 0, W, H);
@@ -1105,6 +1087,7 @@ function applyScene(instant) {
   Sound.setScene();
   Weather.set(state.weather);
   Dust.setScene();
+  Glows.setScene();
   Zones.refreshLabels();
 }
 function setMode(time) { if (time === state.mode) return; state.mode = time; applyScene(); }
@@ -1643,12 +1626,12 @@ const Feed = {
   },
 
   /* ---------- источники ---------- */
-  items(ch) { return (ch.items || ch.playlist || (ch.src ? [ch.src] : [])).map(it => typeof it === 'string' ? (ch.type === 'rutube' ? { id: it } : { url: it }) : it); },
+  items(ch, src = ch) { return (src.items || src.playlist || (src.src ? [src.src] : [])).map(it => typeof it === 'string' ? (src.type === 'rutube' ? { id: it } : { url: it }) : it); },
   pickItem(ch) {
-    const list = this.items(ch); if (!list.length) return null;
-    if (ch._i == null) ch._i = Math.floor(Math.random() * list.length);
-    else ch._i = (ch._i + 1) % list.length;
-    return list[ch._i];
+    const src = this.srcOf(ch), list = this.items(ch, src); if (!list.length) return null;
+    if (src._i == null) src._i = Math.floor(Math.random() * list.length);
+    else src._i = (src._i + 1) % list.length;
+    return list[src._i];
   },
   fileUrl(id, name) { return `${ARCHIVE}/download/${id}/${name.split('/').map(encodeURIComponent).join('/')}`; },
   /* имя файла: сначала — точный список из архива (если он уже пришёл), иначе — из конфига */
@@ -1690,14 +1673,19 @@ const Feed = {
   /* ---------- управление ---------- */
   play(ch) {
     this.halt();
-    this.ch = ch; this.kind = ch.type === 'rutube' ? 'rutube' : 'file';
+    this.ch = ch; this.alt = !!ch._alt; this.kind = this.srcKind(ch);
     this.failed = false; this.msg = ''; this.fails = 0; this.autoMuted = false;
     this.el.classList.add('on');
     if (this.kind === 'rutube') this.rtStart(); else this.fileStart();
   },
+  /* у канала может быть запасной источник (fallback) на другой площадке — когда основной не отвечает */
+  srcKind(ch) { const t = this.alt && ch.fallback ? ch.fallback.type : ch.type; return t === 'rutube' ? 'rutube' : 'file'; },
+  srcOf(ch) { return this.alt && ch.fallback ? ch.fallback : ch; },
   next() {
     if (!this.ch) return;
     TV.burstUntil = nowMs() + CFG.tv.staticBurstMs;
+    // на запасном источнике уже давно — пробуем вернуться к основному
+    if (this.ch._alt && nowMs() - (this.ch._altAt || 0) > 300000) { this.ch._alt = false; this.play(this.ch); return; }
     if (this.kind === 'rutube') this.rtStart(); else this.fileStart();
   },
   halt() {
@@ -1722,17 +1710,25 @@ const Feed = {
   skip(reason) {
     this.fails++;
     this.log('пропуск:', reason);
-    const n = this.ch ? this.items(this.ch).length : 0;
+    const n = this.ch ? this.items(this.ch, this.srcOf(this.ch)).length : 0;
     if (this.fails >= Math.min(5, n + 1)) return this.fail(this.kind === 'rutube' ? 'RuTube не отвечает' : 'архив не отвечает');
     this.show(false); this.setStatus('skip');
     const gen = this.gen;
     setTimeout(() => { if (gen === this.gen && this.ch) this.next(); }, 700);
   },
   fail(msg) {
+    const ch = this.ch;
+    // основной источник молчит, а запасной есть — переходим на него, архив попробуем позже
+    if (ch && ch.fallback && !this.alt) {
+      this.log('основной источник не отвечает — запасной:', ch.fallback.type);
+      ch._alt = true; ch._altAt = nowMs();
+      this.play(ch); this.fails = 0;
+      return;
+    }
     this.failed = true; this.msg = msg; this.show(false); this.setStatus('failed');
-    const gen = ++this.gen, ch = this.ch;
+    const gen = ++this.gen;
     // через полминуты пробуем снова — сеть могла вернуться
-    setTimeout(() => { if (gen === this.gen && this.ch === ch && TV.on) { this.failed = false; this.fails = 0; this.next(); } }, 30000);
+    setTimeout(() => { if (gen === this.gen && this.ch === ch && TV.on) { this.failed = false; this.fails = 0; ch._alt = false; this.play(ch); } }, 30000);
   },
 
   /* ---------- файлы ---------- */
@@ -1890,7 +1886,8 @@ const Feed = {
   tick() {
     if (!this.ch || !TV.on || this.failed) return;
     const t = nowMs();
-    if (this.status === 'tuning' && t - this.t0 > 16000) return this.skip('долго не начинается');
+    const lim = this.kind === 'file' ? (this.v && this.v.readyState >= 1 ? 40000 : 22000) : 16000;   // архив бывает медленным
+    if (this.status === 'tuning' && t - this.t0 > lim) return this.skip('долго не начинается');
     if (this.status === 'playing') {
       if (this.waitSince && t - this.waitSince > 20000) return this.skip('связь пропала');
       if (this.kind === 'rutube' && !this.visible && t - this.t0 > 45000) return this.skip('ролик не пошёл');
@@ -1971,11 +1968,18 @@ const Light = {
     if (!s) return;
     const x = (t - s.t0) / s.dur;
     if (x < 0) return;
-    if (x > 1) { for (const e of [...this.wall, ...this.win]) e.style.opacity = 0; this.sirenRun = null; $('#siren').classList.remove('on'); return; }
+    if (x > 1) { for (const e of [...this.wall, ...this.win]) e.style.opacity = 0; this.sirenRun = null; this.sirenGL = null; $('#siren').classList.remove('on'); GLRoom.dirty = true; return; }
     const prox = Math.exp(-Math.pow((x - 0.5) / 0.22, 2));
     const I = state.fx.siren * prox;
     const ph = (t / 1000 * 3.1) % 1, redOn = ph < 0.5, pulse = REDUCED ? 0.7 : 1;
     const ra = I * (redOn ? 1 : 0.1) * pulse, ba = I * (redOn ? 0.1 : 1) * pulse;
+    if (BG.gl && GLRoom.ok) {
+      // источник во дворе: едет вдоль дома слева направо (по глубине комнаты), мигалка на крыше чуть ниже окна
+      this.sirenGL = { z: lerp(5.4, -11.6, x), r: ra * 1.4, b: ba * 1.4, y: -2.2 };
+      for (const e of [...this.wall, ...this.win]) if (e.style.opacity !== '0') e.style.opacity = 0;
+      return;
+    }
+    this.sirenGL = null;
     const wallPos = lerp(115, -75, x);                    // на стене — справа налево
     this.wall[0].style.transform = `translate3d(${wallPos}%, 0, 0) rotate(-26deg)`;
     this.wall[1].style.transform = `translate3d(${wallPos + 22}%, 3%, 0) rotate(-26deg)`;
@@ -2276,9 +2280,10 @@ const Sound = {
   spot(where, v) {
     v = clamp(v, -1, 1);
     const P = (az, d, y) => { const a = az * Math.PI / 180; return [d * Math.sin(a), y, -d * Math.cos(a)]; };
-    if (where === 'street') return P(30 + 55 * (v + 1) / 2, 7, -1.2);          // двор под окном: от «впереди справа» до «справа»
+    const az = (CFG.audio.azimuth || {}), sa = az.street ?? 57.5, wa = az.window ?? 66;   // где окно: в зале — справа, в комнате — впереди слева
+    if (where === 'street') return P(sa + 55 * v / 2, 7, -1.2);                 // двор под окном: вдоль дома
     if (where === 'kitchen') return P(-125 + 15 * v, 5, 0);                    // по коридору, через стену
-    if (where === 'window') return P(66 + 13 * v, 3.1, 0.35);                  // стекло окна справа: от края до края
+    if (where === 'window') return P(wa + 13 * v, 3.1, 0.35);                  // стекло окна: от края до края
     return P(v * 60, 2.6, 0.2);                                                 // предметы в комнате
   },
   tvPos(seated) { return seated ? [0, 0.05, -1.15] : [0, -0.15, -2.7]; },
@@ -3589,8 +3594,8 @@ const Zones = {
     if (Puppets.busy(egg.id)) return;
     const z = CFG.zones[egg.id];
     const pan = clamp((z.x + z.w / 2 - 50) / 50, -1, 1);
-    // у кубика щелчки звучат на каждом повороте грани; файл egg-rubik, если он есть, играет целиком
-    if (egg.anim !== 'cube' || Sound.files[egg.sound]) Sound.egg(egg.sound, pan);
+    // у кубика щелчок звучит на каждом повороте грани (в самой анимации)
+    if (egg.anim !== 'cube') Sound.egg(egg.sound, pan);
     el.classList.add('active');
     if (egg.id === 'deer') Deer.poke();
     const done = Puppets.items[egg.id] ? Puppets.play(egg.id) : wait(800);
@@ -3600,44 +3605,23 @@ const Zones = {
 };
 
 /* ==========================================================================
-   7a. ФОСФОРНЫЙ ОЛЕНЬ И «RTX»
+   7a. ФОСФОРНЫЕ ОЛЕНИ
    Статуэтка стоит в серванте среди хрусталя. Фосфор днём набирает свет, а в темноте
-   отдаёт его еле заметным холодным зелёным свечением, которое медленно слабеет.
-   «RTX» — расчёт света в хрустале (блики с дисперсией, каустики на задней стенке,
-   отсветы экрана и торшера); считается в шейдере комнаты, кнопка RTX включает и выключает.
+   отдаёт его зелёно-белым свечением, которое медленно слабеет; щелчок по статуэтке — «подзарядка».
    ========================================================================== */
 const Deer = {
-  charge: 1, last: 0, flashT: 0, rtx: false, rk: 0, rFrom: 0, rT0: 0,
-  init() {
-    let saved = null; try { saved = localStorage.getItem('tubetv.rtx'); } catch (_) {}
-    const weak = matchMedia('(max-width: 760px), (pointer: coarse)').matches;
-    this.rtx = saved != null ? saved === '1' : !weak;
-    this.rk = this.rFrom = this.rtx ? 1 : 0;
-    this.last = nowMs();
-    const b = $('#rtxBtn');
-    if (b) { b.setAttribute('aria-pressed', String(this.rtx)); b.addEventListener('click', () => { Sound.start(); this.setRtx(!this.rtx); }); }
-  },
-  setRtx(on) {
-    this.rtx = on; this.rFrom = this.rk; this.rT0 = nowMs();
-    try { localStorage.setItem('tubetv.rtx', on ? '1' : '0'); } catch (_) {}
-    const b = $('#rtxBtn'); if (b) b.setAttribute('aria-pressed', String(on));
-    UI.toast(on ? T.rtxOn : T.rtxOff, 2600);
-    GLRoom.dirty = true;
-  },
-  rtxK(t) {
-    const to = this.rtx ? 1 : 0;
-    if (this.rk !== to) { const k = clamp((t - this.rT0) / 700, 0, 1); this.rk = lerp(this.rFrom, to, smooth(0, 1, k)); if (k >= 1) this.rk = to; GLRoom.dirty = true; }
-    return this.rk;
-  },
+  charge: 1, last: 0, flashT: 0,
+  init() { this.last = nowMs(); },
   /* яркость свечения: чем темнее в комнате, тем заметнее; заряд копится на свету и уходит в темноте */
   level(c) {
     const t = nowMs(), dt = Math.min(1, Math.max(0, (t - this.last) / 1000)); this.last = t;
-    const dark = clamp(c.n + 0.2 * c.w[1] + 0.1 * (c.w[2] + c.w[3]), 0, 1);
+    // вечером при торшере олени уже светятся заметно, ночью — в полную силу; в пасмурный день — едва
+    const dark = clamp(c.n + 0.8 * c.w[1] + 0.12 * (c.w[2] + c.w[3]), 0, 1);
     if (c.n < 0.5) this.charge += (1 - this.charge) * (1 - Math.exp(-dt / 25));
     else this.charge += (0.4 - this.charge) * (1 - Math.exp(-dt / 420));
     if (TV.on) this.charge = Math.min(1, this.charge + TV.level * 0.004 * dt);
     const flash = this.flashT ? Math.max(0, 1 - (t - this.flashT) / 5000) : 0;
-    return dark * (0.55 + 0.45 * this.charge + 0.8 * flash * flash);
+    return dark * (0.6 + 0.4 * this.charge + 0.5 * flash * flash);
   },
   tvLight() {
     if (!TV.on || !(TV.level > 0)) return [0, 0, 0];
@@ -4719,6 +4703,36 @@ const FX = {
 /* ==========================================================================
    8. ИНТЕРФЕЙС: звук, подсказки
    ========================================================================== */
+/* Светящиеся предметы без WebGL (вторая комната): вырезка со свечением поверх картинки,
+   сила — по сцене; ночью чуть «дышит», как настоящий фосфор под взглядом. */
+const Glows = {
+  items: [],
+  init() {
+    for (const g of CFG.glows || []) {
+      const im = new Image(); im.className = 'glow-item'; im.alt = ''; im.draggable = false; im.src = g.image;
+      const [x, y, w, h] = g.sprite;
+      Object.assign(im.style, { left: x / IMG_W * 100 + '%', top: y / IMG_H * 100 + '%', width: w / IMG_W * 100 + '%', height: h / IMG_H * 100 + '%' });
+      $('#fx').parentNode.insertBefore(im, $('#fx'));
+      this.items.push({ g, im });
+    }
+    this.setScene();
+  },
+  setScene() { for (const { g, im } of this.items) im.style.opacity = String(g.scenes[state.scene] || 0); },
+};
+const Rooms = {
+  init() {
+    const b = $('#roomBtn'); if (!b) return;
+    const ids = Object.keys(window.TUBE_TV_ROOMS || {});
+    if (ids.length < 2) { b.hidden = true; return; }
+    const cur = CFG.roomId || ids[0], next = ids[(ids.indexOf(cur) + 1) % ids.length];
+    b.querySelector('span').textContent = window.TUBE_TV_ROOMS[next].short;
+    b.title = `Перейти: ${window.TUBE_TV_ROOMS[next].title}`; b.setAttribute('aria-label', b.title);
+    b.addEventListener('click', () => {
+      try { localStorage.setItem('tubetv.place', next); } catch (_) {}
+      const u = new URL(location.href); u.searchParams.set('room', next); location.href = u.toString();
+    });
+  },
+};
 const UI = {
   init() {
     const intro = $('#intro'); intro.textContent = T.intro;
@@ -4904,6 +4918,8 @@ function init() {
   Puppets.init();
   Deer.init();
   Sega.init();
+  Glows.init();
+  Rooms.init();
   UI.init();
   applyScene(true);
   layout();
@@ -4975,7 +4991,7 @@ function init() {
   };
   requestAnimationFrame(frame);
 
-  window.TubeTV = { GLRoom, BG, TV, Sound, Events, setMode, setWeather, Calib, Puppets, Camera, Feed, Deer, Vent, Wind, Weather, Sega, state, CFG };   // для отладки из консоли
+  window.TubeTV = { GLRoom, BG, TV, Sound, Events, setMode, setWeather, Calib, Puppets, Camera, Feed, Deer, Vent, Wind, Weather, Sega, Light, state, CFG };   // для отладки из консоли
 }
 
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();

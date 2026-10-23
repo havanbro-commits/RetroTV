@@ -702,3 +702,28 @@ body.time-sunset.weather-clear .puppet.hover:not(.anim) .shadow { opacity: 0; }
 /* светящиеся предметы (комната без WebGL) */
 .glow-item { position: absolute; pointer-events: none; mix-blend-mode: screen; opacity: 0; transition: opacity var(--xfade, 2600ms) ease;
   filter: drop-shadow(0 0 calc(var(--u) * 3) rgba(140, 255, 180, .55)); }
+
+/* библиотека картриджей и геймпады */
+.sm-lib { margin-top: 14px; padding-top: 12px; border-top: 1px solid rgba(255, 214, 160, .12); }
+.sm-lib-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.sm-lib-head b { font-size: 19px; font-weight: 400; }
+.sm-lib-n { opacity: .5; font-size: 14px; margin-right: auto; }
+.sm-btn.small { font-size: 15px; padding: 6px 11px; }
+.sm-lib-hint { font-size: 14px; line-height: 1.35; opacity: .6; margin-top: 8px; }
+.sm-lib-hint[hidden] { display: none; }
+.sm-lib-list { display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px 12px; margin-top: 8px; max-height: 180px; overflow: auto; }
+.sm-lib-row { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.sm-lib-play { flex: 1; display: flex; align-items: center; gap: 9px; min-width: 0; text-align: left; cursor: pointer;
+  padding: 6px 8px; border-radius: 9px; border: 1px solid transparent; background: none; color: var(--ink); font: inherit; }
+.sm-lib-play:hover, .sm-lib-play:focus-visible { background: rgba(255, 214, 160, .09); border-color: rgba(255, 214, 160, .2); outline: none; }
+.sm-lib-play.current { border-color: rgba(157, 255, 183, .5); }
+.sm-lib-cart { flex: none; width: 22px; height: 20px; border-radius: 4px 4px 2px 2px; background: linear-gradient(180deg, #2c2b30, #121114); box-shadow: inset 0 1px 0 rgba(255,255,255,.1); }
+.sm-lib-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 16px; }
+.sm-lib-size { flex: none; font-size: 12px; opacity: .45; }
+.sm-lib-x { flex: none; width: 26px; height: 26px; border-radius: 50%; border: 0; background: none; color: var(--ink); opacity: .4; cursor: pointer; font: 18px/1 system-ui, sans-serif; }
+.sm-lib-x:hover { opacity: 1; background: rgba(255, 150, 130, .15); }
+.sm-pads { margin-top: 12px; padding-top: 10px; border-top: 1px solid rgba(255, 214, 160, .12); display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: center; font-size: 15px; }
+.sm-pads-t { opacity: .8; }
+.sm-check { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; opacity: .85; }
+.sm-check input { accent-color: #e9b46a; }
+@media (max-width: 680px) { .sm-lib-list { grid-template-columns: 1fr; } }

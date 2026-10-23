@@ -3649,6 +3649,32 @@ const PAD_KEYS = {
 /* стандартный геймпад (Xbox / PlayStation / 8BitDo) → RetroPad:
    левая, нижняя, правая кнопки — A, B, C; верхняя и плечи — X, Y, Z */
 const PAD_BUTTONS = { 2: 1, 0: 0, 1: 8, 4: 10, 3: 9, 5: 11, 6: 10, 7: 11, 9: 3, 8: 2, 12: 4, 13: 5, 14: 6, 15: 7 };
+/* Библиотека картриджей пользователя: файлы лежат в браузере (IndexedDB), никуда не отправляются */
+const Library = {
+  items: null,
+  db() {
+    if (this._db) return this._db;
+    return (this._db = new Promise((res, rej) => {
+      if (!window.indexedDB) return rej(new Error('no idb'));
+      const r = indexedDB.open('tubetv-carts', 1);
+      r.onupgradeneeded = () => { const d = r.result; if (!d.objectStoreNames.contains('roms')) d.createObjectStore('roms', { keyPath: 'id' }); };
+      r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+    }));
+  },
+  tx(mode, fn) { return this.db().then(d => new Promise((res, rej) => { const t = d.transaction('roms', mode), st = t.objectStore('roms'); const q = fn(st); t.oncomplete = () => res(q && q.result); t.onerror = () => rej(t.error); })); },
+  async list() {
+    const rows = await this.tx('readonly', st => st.getAll()).catch(() => []);
+    this.items = (rows || []).map(r => ({ id: r.id, name: r.name, title: r.title, size: r.size })).sort((a, b) => a.title.localeCompare(b.title, 'ru'));
+    return this.items;
+  },
+  async put(f) {
+    const id = (f.name + ':' + f.size).toLowerCase(), title = f.name.replace(/\.[^.]+$/, '').replace(/[_.]+/g, ' ').trim();
+    await this.tx('readwrite', st => st.put({ id, name: f.name, title, size: f.size, blob: f, at: Date.now() }));
+    await this.list();
+  },
+  get(id) { return this.tx('readonly', st => st.get(id)); },
+  async remove(id) { await this.tx('readwrite', st => st.delete(id)); await this.list(); },
+};
 const Sega = {
   active: false, status: 'off', frame: null, api: null, cart: null, own: null,
   menuOpen: false, mode: 'gl', src: {}, sent: [new Set(), new Set()], pads: 0,
@@ -3668,8 +3694,8 @@ const Sega = {
     // картридж можно просто перетащить на страницу
     addEventListener('dragover', e => { if (e.dataTransfer && [...e.dataTransfer.types].includes('Files')) e.preventDefault(); });
     addEventListener('drop', e => {
-      const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
-      if (!f) return; e.preventDefault(); this.insertFile(f);
+      const fs = [...((e.dataTransfer && e.dataTransfer.files) || [])];
+      if (!fs.length) return; e.preventDefault(); this.addFiles(fs);
     });
     document.addEventListener('visibilitychange', () => {
       if (!this.api) return;
@@ -3696,20 +3722,33 @@ const Sega = {
         <button type="button" class="sm-btn main" data-act="resume">${T.segaResume}</button>
         <button type="button" class="sm-btn" data-act="reset">${T.segaReset}</button>
         <button type="button" class="sm-btn" data-act="off">${T.segaOff}</button></div>
-      <div class="sm-carts">${S.carts.map(cart).join('')}
-        <button type="button" class="sm-cart own" data-act="file">
-          <span class="cart empty" aria-hidden="true"><span class="c-top"></span><span class="c-label"><i>+</i></span><span class="c-grip"></span></span>
-          <span class="sm-name">${T.segaOwn}</span><span class="sm-desc">${T.segaOwnDesc}</span></button>
+      <div class="sm-carts">${S.carts.map(cart).join('')}</div>
+      <div class="sm-lib">
+        <div class="sm-lib-head"><b>${T.segaLib}</b><span class="sm-lib-n"></span>
+          <button type="button" class="sm-btn small" data-act="file">${T.segaLibAdd}</button>
+          <button type="button" class="sm-btn small" data-act="folder">${T.segaLibFolder}</button></div>
+        <div class="sm-lib-list"></div>
+        <div class="sm-lib-hint">${T.segaLibHint}</div>
       </div>
+      <div class="sm-pads"><span class="sm-pads-t"></span>
+        <label class="sm-check"><input type="checkbox" class="sm-kb2"> ${T.segaKb2}</label></div>
       <div class="sm-keys">${T.segaKeys}</div>
-      <input type="file" class="sm-file" tabindex="-1" aria-hidden="true">
+      <input type="file" class="sm-file" tabindex="-1" aria-hidden="true" multiple>
+      <input type="file" class="sm-folder" tabindex="-1" aria-hidden="true" webkitdirectory directory multiple>
     </div>`;
     document.getElementById('app').appendChild(m);
     this.menu = m;
     const file = m.querySelector('.sm-file');
     // на iPhone и iPad фильтр по незнакомым расширениям делает все файлы серыми — там проверяем имя сами
     if (!matchMedia('(pointer: coarse)').matches) file.accept = S.accept;
-    file.addEventListener('change', () => { const f = file.files && file.files[0]; file.value = ''; if (f) this.insertFile(f); });
+    file.addEventListener('change', () => { const fs = [...(file.files || [])]; file.value = ''; this.addFiles(fs); });
+    const folder = m.querySelector('.sm-folder');
+    folder.addEventListener('change', () => { const fs = [...(folder.files || [])]; folder.value = ''; this.addFiles(fs); });
+    const kb2 = m.querySelector('.sm-kb2');
+    try { kb2.checked = localStorage.getItem('tubetv.kb2') === '1'; } catch (_) {}
+    this.kb2 = kb2.checked;
+    kb2.addEventListener('change', () => { this.kb2 = kb2.checked; try { localStorage.setItem('tubetv.kb2', kb2.checked ? '1' : '0'); } catch (_) {} this.releaseAll(); });
+    Library.list().then(() => this.renderLib()).catch(() => {});
     m.addEventListener('click', e => {
       if (e.target === m) return this.closeMenu();
       const b = e.target.closest('button'); if (!b) return;
@@ -3717,6 +3756,9 @@ const Sega = {
       const id = b.dataset.cart, act = b.dataset.act;
       if (id) this.insert(S.carts.find(c => c.id === id), b);
       else if (act === 'file') file.click();
+      else if (act === 'folder') folder.click();
+      else if (act === 'play') Library.get(b.dataset.lib).then(rec => rec && this.insert({ id: 'lib:' + rec.id, title: rec.title, file: new File([rec.blob], rec.name) }, b)).catch(() => UI.toast(T.segaFail, 3000));
+      else if (act === 'remove') { Library.remove(b.dataset.lib).then(() => this.renderLib()); e.stopPropagation(); }
       else if (act === 'close') this.closeMenu();
       else if (act === 'resume') { this.closeMenu(); this.wake(); }
       else if (act === 'reset') { this.closeMenu(); if (this.api) { this.api.reset(); Sound.segaSwitch(true); } }
@@ -3731,12 +3773,15 @@ const Sega = {
     f[(i < 0 ? 0 : (i + dir + f.length) % f.length)].focus();
   },
   padName(gp) { return (gp && gp.id ? gp.id.replace(/\s*\(.*?\)\s*/g, ' ').trim() : '') || T.segaPadGeneric; },
+  gamepads() { try { return [...navigator.getGamepads()].filter(g => g && g.connected !== false); } catch (_) { return []; } },
   syncPadLabel() {
     if (!this.menu) return;
-    const gp = navigator.getGamepads ? [...navigator.getGamepads()].find(Boolean) : null;
+    const list = this.gamepads(), gp = list[0];
     const el = this.menu.querySelector('.sm-pad');
     el.textContent = gp ? T.segaPadOn.replace('%s', this.padName(gp)) : T.segaPadOff;
     el.classList.toggle('on', !!gp);
+    const pt = this.menu.querySelector('.sm-pads-t');
+    if (pt) pt.textContent = list.length ? list.slice(0, 2).map((g, i) => `${i + 1}P — ${this.padName(g)}`).join(' · ') : T.segaPadsNone;
   },
   openMenu() {
     if (this.menuOpen) return;
@@ -3777,11 +3822,32 @@ const Sega = {
   },
 
   /* ---------- картридж ---------- */
-  insertFile(f) {
-    const ok = /\.(md|bin|gen|smd|68k|sgd|zip|7z)$/i.test(f.name);
-    if (!ok) { UI.toast(T.segaBadFile, 3200); return; }
-    this.own = f;
-    this.insert({ id: 'own', title: f.name.replace(/\.[^.]+$/, ''), file: f });
+  isRom(f) { return /\.(md|bin|gen|smd|68k|sgd|zip|7z)$/i.test(f.name); },
+  /* файлы пользователя: один — сразу в приставку; несколько или папка — в библиотеку (хранится в браузере) */
+  async addFiles(fs) {
+    const roms = fs.filter(f => this.isRom(f));
+    if (!roms.length) { UI.toast(T.segaBadFile, 3200); return; }
+    if (roms.length === 1 && fs.length === 1) {
+      const f = roms[0];
+      Library.put(f).then(() => this.renderLib()).catch(() => {});
+      this.insert({ id: 'own', title: f.name.replace(/\.[^.]+$/, ''), file: f });
+      return;
+    }
+    let n = 0;
+    for (const f of roms) { try { await Library.put(f); n++; } catch (_) {} }
+    this.renderLib();
+    UI.toast(T.segaLibAdded.replace('%s', n), 3200);
+    if (!this.menuOpen) this.openMenu();
+  },
+  renderLib() {
+    const box = this.menu && this.menu.querySelector('.sm-lib-list'); if (!box) return;
+    const items = Library.items || [];
+    this.menu.querySelector('.sm-lib-n').textContent = items.length ? String(items.length) : '';
+    this.menu.querySelector('.sm-lib-hint').hidden = items.length > 0;
+    box.innerHTML = items.map(r => `<div class="sm-lib-row"><button type="button" class="sm-lib-play" data-act="play" data-lib="${r.id}">
+        <span class="sm-lib-cart" aria-hidden="true"></span><span class="sm-lib-name">${r.title.replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]))}</span><span class="sm-lib-size">${(r.size / 1048576).toFixed(1)} МБ</span></button>
+        <button type="button" class="sm-lib-x" data-act="remove" data-lib="${r.id}" aria-label="${T.segaLibRemove}">×</button></div>`).join('');
+    for (const b of box.querySelectorAll('.sm-lib-play')) b.classList.toggle('current', !!this.cart && this.cart.id === 'lib:' + b.dataset.lib);
   },
   async insert(cart, btn) {
     if (!cart) return;
@@ -3949,7 +4015,7 @@ const Sega = {
   setSource(source, set) { this.src[source] = set; this.flush(); },
   flush() {
     const want = [new Set(), new Set()];
-    for (const [k, s] of Object.entries(this.src)) { const p = k === 'pad1' ? 1 : 0; for (const i of s) want[p].add(i); }
+    for (const [k, s] of Object.entries(this.src)) { const p = k === 'pad1' || (k === 'kb' && this.kb2) ? 1 : 0; for (const i of s) want[p].add(i); }
     for (let p = 0; p < 2; p++) {
       for (const i of this.sent[p]) if (!want[p].has(i)) this.send(p, i, 0);
       for (const i of want[p]) if (!this.sent[p].has(i)) this.send(p, i, 1);
@@ -3997,14 +4063,8 @@ const Sega = {
     if (!(this.active || this.menuOpen) || !navigator.getGamepads) return;
     let list; try { list = [...navigator.getGamepads()].filter(g => g && g.connected !== false); } catch (_) { return; }
     if (!list.length) { if (this.src.pad0 && this.src.pad0.size || this.src.pad1 && this.src.pad1.size) { this.src.pad0 = new Set(); this.src.pad1 = new Set(); this.flush(); } return; }
-    const read = gp => {
-      const s = new Set();
-      gp.buttons.forEach((b, i) => { if ((b.pressed || b.value > 0.5) && PAD_BUTTONS[i] != null) s.add(PAD_BUTTONS[i]); });
-      const ax = gp.axes[0] || 0, ay = gp.axes[1] || 0;
-      if (ax < -0.5) s.add(6); if (ax > 0.5) s.add(7); if (ay < -0.5) s.add(4); if (ay > 0.5) s.add(5);
-      return s;
-    };
-    const s0 = read(list[0]), home = list[0].buttons[16] && list[0].buttons[16].pressed;
+    const read = gp => this.readPad(gp);
+    const s0 = read(list[0]), home = this.homePressed(list[0]);
     if (this.menuOpen) {                         // меню: крестовина — выбор, A/Start — вставить, B — назад
       const prev = this._mp || new Set(), hit = i => s0.has(i) && !prev.has(i);
       if (hit(7) || hit(5)) this.moveFocus(1);
@@ -4021,6 +4081,39 @@ const Sega = {
     if (this._skipPad && t < this._skipPad) return;
     this.src.pad0 = s0; this.src.pad1 = list[1] ? read(list[1]) : new Set();
     this.flush();
+  },
+  /* геймпад → кнопки приставки. Xbox 360 / One и DualShock / DualSense в Chrome, Safari и Firefox на
+     Mac и Windows приходят в «стандартной» раскладке; без неё (Linux, некоторые Firefox) — свои схемы. */
+  readPad(gp) {
+    const s = new Set(), add = (i, m) => { const b = gp.buttons[i]; if (b && (b.pressed || b.value > 0.5) && m != null) s.add(m); };
+    const stick = (ax, ay) => { if (ax < -0.5) s.add(6); if (ax > 0.5) s.add(7); if (ay < -0.5) s.add(4); if (ay > 0.5) s.add(5); };
+    const id = (gp.id || '').toLowerCase();
+    if (gp.mapping === 'standard' || gp.buttons.length >= 16) {
+      for (const [i, m] of Object.entries(PAD_BUTTONS)) add(+i, m);
+      stick(gp.axes[0] || 0, gp.axes[1] || 0);
+    } else if (/054c|dualsense|dualshock|wireless controller|playstation/.test(id)) {
+      // DualSense / DualShock 4 без стандартной раскладки: □ × ○ △, L1 R1 L2 R2, Share, Options, L3, R3, PS; крестовина — ось-«шляпка»
+      const m = { 0: 1, 1: 0, 2: 8, 3: 9, 4: 10, 5: 11, 6: 10, 7: 11, 8: 2, 9: 3 };
+      for (const [i, v] of Object.entries(m)) add(+i, v);
+      stick(gp.axes[0] || 0, gp.axes[1] || 0);
+      const hat = gp.axes[9]; if (typeof hat === 'number' && hat > -1.5 && hat < 1.5) {
+        const k = Math.round((hat + 1) / 2 * 7);       // 0 — вверх, по часовой
+        if ([7, 0, 1].includes(k)) s.add(4); if ([1, 2, 3].includes(k)) s.add(7); if ([3, 4, 5].includes(k)) s.add(5); if ([5, 6, 7].includes(k)) s.add(6);
+      }
+    } else {
+      // Xbox 360 / One без раскладки (Linux xpad): A B X Y LB RB Back Start Guide; крестовина — оси 6/7
+      const m = { 0: 0, 1: 8, 2: 1, 3: 9, 4: 10, 5: 11, 6: 2, 7: 3 };
+      for (const [i, v] of Object.entries(m)) add(+i, v);
+      stick(gp.axes[0] || 0, gp.axes[1] || 0);
+      stick(gp.axes[6] || 0, gp.axes[7] || 0);
+      add(11, 4); add(12, 5); add(13, 6); add(14, 7);
+    }
+    return s;
+  },
+  homePressed(gp) {
+    const id = (gp.id || '').toLowerCase();
+    const i = gp.mapping === 'standard' || gp.buttons.length >= 16 ? 16 : /054c|dualsense|dualshock|playstation/.test(id) ? 12 : 8;
+    return !!(gp.buttons[i] && gp.buttons[i].pressed);
   },
 
   /* ---------- экранный джойстик (телефон, планшет) ---------- */

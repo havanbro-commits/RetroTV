@@ -7,7 +7,7 @@
    и вставьте результат вместо блока zones ниже.
    ============================================================ */
 window.TUBE_TV_CONFIG = {
-  version: '0.10',
+  version: '0.11',
   image: { width: 1536, height: 1024 },
 
   /* Сцены. Время суток переключает торшер (timeCycle), погоду — клик по окну
@@ -127,7 +127,7 @@ window.TUBE_TV_CONFIG = {
       { id: 'bricks', title: 'Кирпичики',        rom: 'carts/bricks.bin', label: 'assets/carts/bricks.webp',
         desc: 'Выбей все кирпичи — дальше быстрее' },
       { id: 'patrol', title: 'Звёздный патруль', rom: 'carts/patrol.bin', label: 'assets/carts/patrol.webp',
-        desc: 'Защити двор от тарелок' },
+        desc: 'Защити двор от тарелок. Вдвоём!' },
     ],
   },
 
@@ -341,9 +341,15 @@ window.TUBE_TV_CONFIG = {
     segaResume: 'Продолжить',
     segaReset: 'Сначала',
     segaOff: 'Выключить приставку',
-    segaOwn: 'Свой картридж…',
-    segaOwnDesc: 'Файл .md, .bin, .gen, .smd или .zip — можно перетащить',
-    segaKeys: '<b>Клавиатура:</b> <kbd>←</kbd><kbd>↑</kbd><kbd>↓</kbd><kbd>→</kbd> крестовина · <kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> кнопки A B C · <kbd>Q</kbd><kbd>W</kbd><kbd>E</kbd> X Y Z · <kbd>Enter</kbd> Start · <kbd>Esc</kbd> это меню<br><b>Геймпад:</b> подключите и нажмите любую кнопку. Крестовина или стик, три кнопки — A B C, Start, кнопка «домой» — меню',
+    segaLib: 'Моя библиотека',
+    segaLibAdd: 'Добавить файлы…',
+    segaLibFolder: 'Добавить папку…',
+    segaLibHint: 'Свои картриджи (.md, .bin, .gen, .smd, .zip) — добавьте файлы или целую папку, можно просто перетащить на страницу. Они остаются в этом браузере и никуда не отправляются.',
+    segaLibAdded: 'В библиотеку добавлено: %s',
+    segaLibRemove: 'Убрать из библиотеки',
+    segaKb2: 'Клавиатура — второй игрок (геймпад — первый)',
+    segaPadsNone: 'Геймпады: не подключены. Подключите один или два и нажмите любую кнопку',
+    segaKeys: '<b>Вдвоём:</b> первый подключённый геймпад — игрок 1, второй — игрок 2 (Xbox, PlayStation, 8BitDo и любые другие). В «Звёздном патруле» второй жмёт Start и влетает в бой.<br><b>Клавиатура:</b> <kbd>←</kbd><kbd>↑</kbd><kbd>↓</kbd><kbd>→</kbd> крестовина · <kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> кнопки A B C · <kbd>Q</kbd><kbd>W</kbd><kbd>E</kbd> X Y Z · <kbd>Enter</kbd> Start · <kbd>Esc</kbd> это меню<br><b>Геймпад:</b> подключите и нажмите любую кнопку. Крестовина или стик, три кнопки — A B C, Start, кнопка «домой» — меню',
     segaPadOn: 'Геймпад: %s',
     segaPadOff: 'Геймпад не найден — подключите и нажмите кнопку',
     segaPadGeneric: 'подключён',

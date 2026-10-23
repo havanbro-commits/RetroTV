@@ -1,4 +1,5 @@
 // «ЗВЁЗДНЫЙ ПАТРУЛЬ» — картридж Tube TV: вертикальная стрелялка. Волны тарелок, жуков и бомбардировщиков.
+// Вдвоём: второй игрок нажимает START на втором геймпаде — в любой момент, хоть посреди волны.
 #include <genesis.h>
 #include "tt.h"
 #include "gfx.h"
@@ -17,8 +18,8 @@ typedef struct { s16 x, y, vx, vy; u8 on; } Bul;
 typedef struct { s32 x, y; s16 vx, vy; u8 on, type, hp, t; s16 ph, cx; u16 age; } Ene;
 typedef struct { s16 x, y; u8 on, t; } Boom;
 
-static s16 px, py; static u8 lives, inv, cool, dbl;
-static u16 dblTimer;
+typedef struct { s16 x, y; u8 lives, inv, cool, dbl, on; u16 dblTimer, prev; } Ship;
+static Ship sh[2];
 static Bul bl[MAXB], eb[MAXEB];
 static Ene en[MAXE];
 static Boom bx[MAXX];
@@ -37,6 +38,7 @@ static void scroll_sky(void)
 }
 static u16 prevJoy;
 static bool over;
+static u8 players;                          // сколько кораблей в игре (1 или 2)
 
 static const s16 sinT[64] = { 0, 25, 50, 74, 98, 121, 142, 162, 181, 198, 213, 226, 237, 245, 251, 255, 256, 255, 251, 245, 237, 226, 213, 198, 181, 162, 142, 121, 98, 74, 50, 25,
     0, -25, -50, -74, -98, -121, -142, -162, -181, -198, -213, -226, -237, -245, -251, -255, -256, -255, -251, -245, -237, -226, -213, -198, -181, -162, -142, -121, -98, -74, -50, -25 };
@@ -54,7 +56,9 @@ static void hud(void)
 {
     tt_text(WINDOW, "ОЧКИ", 1, 0, PAL0, 1); tt_num(WINDOW, score, 6, 6, 0, PAL3, 1);
     tt_text(WINDOW, "ВОЛНА", 15, 0, PAL0, 1); tt_num(WINDOW, wave, 2, 21, 0, PAL3, 1);
-    tt_text(WINDOW, "КОРАБЛИ", 26, 0, PAL0, 1); tt_num(WINDOW, lives, 1, 34, 0, PAL3, 1);
+    tt_text(WINDOW, "1P", 26, 0, PAL0, 1); tt_num(WINDOW, sh[0].lives, 1, 29, 0, PAL3, 1);
+    if (players > 1) { tt_text(WINDOW, "2P", 32, 0, PAL0, 1); tt_num(WINDOW, sh[1].lives, 1, 35, 0, PAL3, 1); }
+    else tt_text(WINDOW, "2P:START", 31, 1, PAL0, 1);
     tt_text(WINDOW, "РЕКОРД", 14, 1, PAL0, 1); tt_num(WINDOW, best, 6, 21, 1, PAL3, 1);
 }
 
@@ -112,7 +116,9 @@ static void fire_enemy(Ene *e)
     for (u8 i = 0; i < MAXEB; i++) if (!eb[i].on) {
         Bul *b = &eb[i]; b->on = 1;
         b->x = (e->x >> 4) + 4; b->y = (e->y >> 4) + 10;
-        s16 dx = px + 4 - b->x, dy = py - b->y;
+        Ship *t = &sh[0];
+        if (sh[1].on && (!sh[0].on || (sh[1].y - b->y) * (sh[1].y - b->y) + (sh[1].x - b->x) * (sh[1].x - b->x) < (sh[0].y - b->y) * (sh[0].y - b->y) + (sh[0].x - b->x) * (sh[0].x - b->x))) t = &sh[1];
+        s16 dx = t->x + 4 - b->x, dy = t->y - b->y;
         s16 ax = dx < 0 ? -dx : dx, ay = dy < 0 ? -dy : dy, m = ax > ay ? ax + ay / 2 : ay + ax / 2;
         if (m < 1) m = 1;
         s16 sp = 22 + wave * 2;
@@ -125,15 +131,16 @@ static void fire_enemy(Ene *e)
     }
 }
 
-static void player_hit(void)
+static void player_hit(Ship *p)
 {
-    if (inv) return;
-    boom(px, py, TRUE);
+    if (p->inv) return;
+    boom(p->x, p->y, TRUE);
     tt_sfx(0, N_C5, N_C3, 40, 1);
-    if (lives) lives--;
-    inv = 120; dbl = 0;
+    if (p->lives) p->lives--;
+    p->inv = 120; p->dbl = 0;
+    if (!p->lives) p->on = 0;
     hud();
-    if (!lives) {
+    if (!sh[0].on && !sh[1].on) {
         over = TRUE;
         if (score > best) best = score;
         hud();
@@ -146,8 +153,10 @@ static void player_hit(void)
 static void new_game(void)
 {
     memset(bl, 0, sizeof(bl)); memset(eb, 0, sizeof(eb)); memset(en, 0, sizeof(en)); memset(bx, 0, sizeof(bx));
-    px = 152; py = 180; lives = 3; inv = 90; cool = 0; dbl = 0; starOn = 0;
-    score = 0; wave = 0; over = FALSE;
+    memset(sh, 0, sizeof(sh));
+    sh[0].x = players > 1 ? 112 : 152; sh[0].y = 180; sh[0].lives = 3; sh[0].inv = 90; sh[0].on = 1;
+    if (players > 1) { sh[1].x = 192; sh[1].y = 180; sh[1].lives = 3; sh[1].inv = 90; sh[1].on = 1; }
+    starOn = 0; score = 0; wave = 0; over = FALSE;
     tt_music_stop();
     sky();
     next_wave();
@@ -164,9 +173,9 @@ static void put(s16 x, s16 y, u8 size, u16 attr)
 static void draw(void)
 {
     nspr = 0;
-    if (!over && (!inv || (frame & 4))) {
-        put(px, py, SPRITE_SIZE(2, 2), TILE_ATTR_FULL(PAL2, 1, 0, 0, TS + S_SHIP));
-        put(px + 4, py + 14, SPRITE_SIZE(1, 1), TILE_ATTR_FULL(PAL2, 1, 0, 0, TS + ((frame & 2) ? S_FLAME1 : S_FLAME2)));
+    for (u8 k = 0; k < 2; k++) if (sh[k].on && !over && (!sh[k].inv || (frame & 4))) {
+        put(sh[k].x, sh[k].y, SPRITE_SIZE(2, 2), TILE_ATTR_FULL(PAL2, 1, 0, 0, TS + (k ? S_SHIP2 : S_SHIP)));
+        put(sh[k].x + 4, sh[k].y + 14, SPRITE_SIZE(1, 1), TILE_ATTR_FULL(PAL2, 1, 0, 0, TS + ((frame & 2) ? S_FLAME1 : S_FLAME2)));
     }
     for (u8 i = 0; i < MAXB; i++) if (bl[i].on) put(bl[i].x, bl[i].y, SPRITE_SIZE(1, 1), TILE_ATTR_FULL(PAL2, 1, 0, 0, TS + S_SHOT));
     for (u8 i = 0; i < MAXEB; i++) if (eb[i].on) put(eb[i].x >> 4, eb[i].y >> 4, SPRITE_SIZE(1, 1), TILE_ATTR_FULL(PAL2, 1, 0, 0, TS + S_ESHOT));
@@ -188,26 +197,31 @@ static bool hit(s16 ax, s16 ay, s16 aw, s16 ah, s16 bx_, s16 by, s16 bw, s16 bh)
     return ax < bx_ + bw && ax + aw > bx_ && ay < by + bh && ay + ah > by;
 }
 
-static void update(u16 j, u16 pressed)
+static void steer(Ship *p, u16 j)
 {
-    // корабль
+    s16 sp = 2;
+    if (j & BUTTON_LEFT) p->x -= sp;
+    if (j & BUTTON_RIGHT) p->x += sp;
+    if (j & BUTTON_UP) p->y -= sp;
+    if (j & BUTTON_DOWN) p->y += sp;
+    p->x = p->x < 4 ? 4 : (p->x > 300 ? 300 : p->x);
+    p->y = p->y < 24 ? 24 : (p->y > 204 ? 204 : p->y);
+    if (p->cool) p->cool--;
+    if ((j & (BUTTON_A | BUTTON_B | BUTTON_C)) && !p->cool) {
+        p->cool = 9;
+        for (u8 k = 0; k < (p->dbl ? 2 : 1); k++)
+            for (u8 i = 0; i < MAXB; i++) if (!bl[i].on) { bl[i].on = 1; bl[i].x = p->x + 4 + (p->dbl ? (k ? 5 : -5) : 0); bl[i].y = p->y - 6; break; }
+        tt_sfx(1, 1800, 1100, 4, 4);
+    }
+    if (p->inv) p->inv--;
+    if (p->dbl && --p->dblTimer == 0) p->dbl = 0;
+}
+
+static void update(u16 j, u16 j2)
+{
     if (!over) {
-        s16 sp = 2;
-        if (j & BUTTON_LEFT) px -= sp;
-        if (j & BUTTON_RIGHT) px += sp;
-        if (j & BUTTON_UP) py -= sp;
-        if (j & BUTTON_DOWN) py += sp;
-        px = px < 4 ? 4 : (px > 300 ? 300 : px);
-        py = py < 24 ? 24 : (py > 204 ? 204 : py);
-        if (cool) cool--;
-        if ((j & (BUTTON_A | BUTTON_B | BUTTON_C)) && !cool) {
-            cool = 9;
-            for (u8 k = 0; k < (dbl ? 2 : 1); k++)
-                for (u8 i = 0; i < MAXB; i++) if (!bl[i].on) { bl[i].on = 1; bl[i].x = px + 4 + (dbl ? (k ? 5 : -5) : 0); bl[i].y = py - 6; break; }
-            tt_sfx(1, 1800, 1100, 4, 4);
-        }
-        if (inv) inv--;
-        if (dbl && --dblTimer == 0) dbl = 0;
+        if (sh[0].on) steer(&sh[0], j);
+        if (sh[1].on) steer(&sh[1], j2);
     }
     for (u8 i = 0; i < MAXB; i++) if (bl[i].on) { bl[i].y -= 6; if (bl[i].y < 8) bl[i].on = 0; }
     // враги
@@ -231,21 +245,22 @@ static void update(u16 j, u16 pressed)
             } else tt_sfx(2, 400, 300, 4, 3);
             break;
         }
-        if (e->on && !over && hit(px + 3, py + 3, 10, 11, x + 2, y + 2, 12, 10)) { e->on = 0; boom(x, y, FALSE); player_hit(); }
+        for (u8 k = 0; k < 2; k++) if (e->on && !over && sh[k].on && hit(sh[k].x + 3, sh[k].y + 3, 10, 11, x + 2, y + 2, 12, 10)) { e->on = 0; boom(x, y, FALSE); player_hit(&sh[k]); }
     }
     for (u8 i = 0; i < MAXEB; i++) if (eb[i].on) {
         Bul *b = &eb[i]; b->x += b->vx; b->y += b->vy;
         s16 x = b->x >> 4, y = b->y >> 4;
         if (y > 230 || y < -8 || x < -8 || x > 328) { b->on = 0; continue; }
-        if (!over && hit(px + 5, py + 4, 6, 9, x + 2, y + 2, 4, 4)) { b->on = 0; player_hit(); }
+        for (u8 k = 0; k < 2; k++) if (!over && sh[k].on && hit(sh[k].x + 5, sh[k].y + 4, 6, 9, x + 2, y + 2, 4, 4)) { b->on = 0; player_hit(&sh[k]); break; }
     }
     for (u8 i = 0; i < MAXX; i++) if (bx[i].on && ++bx[i].t >= 20) bx[i].on = 0;
     if (starOn) {
         starY += 1;
         if (starY > 230) starOn = 0;
-        else if (!over && hit(px, py, 16, 16, starX, starY, 8, 8)) {
-            starOn = 0; dbl = 1; dblTimer = 60 * 15; score += 50; hud();
+        else for (u8 k = 0; k < 2; k++) if (!over && sh[k].on && hit(sh[k].x, sh[k].y, 16, 16, starX, starY, 8, 8)) {
+            starOn = 0; sh[k].dbl = 1; sh[k].dblTimer = 60 * 15; score += 50; hud();
             tt_sfx(0, N_C5, N_C6, 8, 1); tt_sfx(1, N_E5, N_E5 * 2, 12, 2);
+            break;
         }
     }
     if (!over && !spawnLeft && !any) next_wave();
@@ -262,13 +277,16 @@ static void title(void)
         VDP_setTileMapXY(BG_A, TILE_ATTR_FULL(PAL0, 1, 0, 0, TT2 + y * TITLE2_W + x), (40 - TITLE2_W) / 2 + x, 9 + y);
     tt_textc(BG_A, "ЗАЩИТИ СВОЙ ДВОР ОТ ТАРЕЛОК!", 15, PAL0, 1);
     tt_textc(BG_A, "A, B, C - ОГОНЬ  * - ДВОЙНОЙ", 17, PAL0, 1);
+    tt_textc(BG_A, "ВДВОЁМ: START НА ВТОРОМ ГЕЙМПАДЕ", 19, PAL0, 1);
     tt_textc(BG_A, "TUBE TV 1995", 25, PAL0, 1);
     tt_music(m_title, b_title, TRUE);
     u16 f = 0;
     while (1) {
-        u16 j = JOY_readJoypad(JOY_1);
-        if ((j & (BUTTON_START | BUTTON_A | BUTTON_B | BUTTON_C)) && !(prevJoy & (BUTTON_START | BUTTON_A | BUTTON_B | BUTTON_C))) { prevJoy = j; break; }
-        prevJoy = j;
+        u16 j = JOY_readJoypad(JOY_1), j2 = JOY_readJoypad(JOY_2);
+        const u16 go = BUTTON_START | BUTTON_A | BUTTON_B | BUTTON_C;
+        if ((j & go) && !(prevJoy & go)) { prevJoy = j; players = 1; break; }
+        if ((j2 & go) && !(sh[1].prev & go)) { sh[1].prev = j2; players = 2; break; }
+        prevJoy = j; sh[1].prev = j2;
         if ((f % 40) == 0) tt_textc(BG_A, "НАЖМИТЕ START", 21, PAL3, 1);
         if ((f % 40) == 26) tt_clear_row(BG_A, 21);
         scroll_sky();
@@ -301,9 +319,15 @@ int main(bool hard)
     new_game();
     while (1) {
         u16 j = JOY_readJoypad(JOY_1), pressed = j & ~prevJoy;
-        prevJoy = j;
-        if (over) { if (pressed & BUTTON_START) { VDP_clearPlane(BG_A, TRUE); new_game(); } }
-        update(j, pressed);
+        u16 j2 = JOY_readJoypad(JOY_2), pressed2 = j2 & ~sh[1].prev;
+        prevJoy = j; sh[1].prev = j2;
+        if (over) { if ((pressed | pressed2) & BUTTON_START) { VDP_clearPlane(BG_A, TRUE); new_game(); } }
+        else if (players < 2 && (pressed2 & BUTTON_START)) {        // второй игрок подключился на ходу
+            players = 2; sh[1].x = 192; sh[1].y = 196; sh[1].lives = 3; sh[1].inv = 120; sh[1].on = 1; sh[1].cool = 0; sh[1].dbl = 0;
+            tt_sfx(0, N_C5, N_C6, 8, 1);
+            tt_clear_row(WINDOW, 1); hud();
+        }
+        update(j, j2);
         scroll_sky();
         draw();
         frame++;

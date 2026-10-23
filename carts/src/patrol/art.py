@@ -23,6 +23,8 @@ ommmmmmmmmmmmmdo
 .ommddooooddmmo.
 ..ooo.......ooo.
 ................''', K)
+    # второй корабль: тот же силуэт, корпус жёлто-оранжевый
+    ship2 = [[{3: 6, 5: 7, 4: 7}.get(v, v) for v in row] for row in ship]
     flame1 = G.art('''
 ...yffy.
 ...yyfy.
@@ -166,7 +168,7 @@ oo....oo''', K)
     spr = []
     def add(name, img, w, h):
         idx = len(spr); spr.extend(G.cut(img, w, h)); return f'#define S_{name} {idx}'
-    defs = [add('SHIP', ship, 2, 2), add('FLAME1', flame1, 1, 1), add('FLAME2', flame2, 1, 1), add('SHOT', shot, 1, 1),
+    defs = [add('SHIP', ship, 2, 2), add('SHIP2', ship2, 2, 2), add('FLAME1', flame1, 1, 1), add('FLAME2', flame2, 1, 1), add('SHOT', shot, 1, 1),
             add('ESHOT', eshot, 1, 1), add('SAUCER', saucer, 2, 2), add('SAUCER2', saucer2, 2, 2), add('BUG', bug, 2, 2),
             add('BOMBER', bomber, 2, 2), add('STAR', star, 1, 1)]
     for i, b in enumerate(booms): defs.append(add(f'BOOM{i}', b, 2, 2))

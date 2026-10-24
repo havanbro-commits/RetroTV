@@ -727,3 +727,12 @@ body.time-sunset.weather-clear .puppet.hover:not(.anim) .shadow { opacity: 0; }
 .sm-check { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; opacity: .85; }
 .sm-check input { accent-color: #e9b46a; }
 @media (max-width: 680px) { .sm-lib-list { grid-template-columns: 1fr; } }
+
+/* ссылка на библиотеку Internet Archive */
+.sm-archive { display: flex; align-items: center; gap: 12px; margin-top: 12px; padding: 10px 14px; border-radius: 12px; text-decoration: none; color: var(--ink);
+  background: rgba(255, 214, 160, .05); border: 1px solid rgba(255, 214, 160, .18); }
+.sm-archive:hover, .sm-archive:focus-visible { background: rgba(255, 214, 160, .12); outline: none; box-shadow: 0 0 0 2px rgba(255, 214, 160, .5); }
+.sm-archive-t { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.sm-archive-t b { font-weight: 400; font-size: 18px; }
+.sm-archive-t span { font-size: 14px; opacity: .65; }
+.sm-archive-go { margin-left: auto; font-size: 20px; opacity: .6; }

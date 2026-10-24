@@ -3730,6 +3730,8 @@ const Sega = {
         <div class="sm-lib-list"></div>
         <div class="sm-lib-hint">${T.segaLibHint}</div>
       </div>
+      <a class="sm-archive" href="${S.archiveUrl}" target="_blank" rel="noopener">
+        <span class="sm-archive-t"><b>${T.segaArchive}</b><span>${T.segaArchiveDesc}</span></span><span class="sm-archive-go" aria-hidden="true">↗</span></a>
       <div class="sm-pads"><span class="sm-pads-t"></span>
         <label class="sm-check"><input type="checkbox" class="sm-kb2"> ${T.segaKb2}</label></div>
       <div class="sm-keys">${T.segaKeys}</div>
@@ -3766,7 +3768,7 @@ const Sega = {
     });
     this.syncPadLabel();
   },
-  focusables() { return [...this.menu.querySelectorAll('button')].filter(b => b.offsetParent !== null); },
+  focusables() { return [...this.menu.querySelectorAll('button, a.sm-archive')].filter(b => b.offsetParent !== null); },
   moveFocus(dir) {
     const f = this.focusables().filter(b => !b.classList.contains('sm-x')); if (!f.length) return;
     const i = f.indexOf(document.activeElement);

@@ -121,6 +121,7 @@ window.TUBE_TV_CONFIG = {
     volume: 1.3,                         // громкость приставки в динамике телевизора (игры тише телеэфира)
     frame: [640, 480],                   // размер невидимой рамки эмулятора (кадр 4:3)
     accept: '.md,.bin,.gen,.smd,.68k,.sgd,.zip,.7z',
+    archiveUrl: 'https://archive.org/details/softwarelibrary_sega_genesis',   // библиотека Internet Archive: играется в браузере
     carts: [
       { id: 'snake',  title: 'Змейка',           rom: 'carts/snake.bin',  label: 'assets/carts/snake.webp',
         desc: 'Двор, яблоки и золотая груша' },
@@ -347,6 +348,8 @@ window.TUBE_TV_CONFIG = {
     segaLibHint: 'Свои картриджи (.md, .bin, .gen, .smd, .zip) — добавьте файлы или целую папку, можно просто перетащить на страницу. Они остаются в этом браузере и никуда не отправляются.',
     segaLibAdded: 'В библиотеку добавлено: %s',
     segaLibRemove: 'Убрать из библиотеки',
+    segaArchive: 'Библиотека Internet Archive',
+    segaArchiveDesc: 'Игры Mega Drive в браузере, на их сайте — откроется в новой вкладке',
     segaKb2: 'Клавиатура — второй игрок (геймпад — первый)',
     segaPadsNone: 'Геймпады: не подключены. Подключите один или два и нажмите любую кнопку',
     segaKeys: '<b>Вдвоём:</b> первый подключённый геймпад — игрок 1, второй — игрок 2 (Xbox, PlayStation, 8BitDo и любые другие). В «Звёздном патруле» второй жмёт Start и влетает в бой.<br><b>Клавиатура:</b> <kbd>←</kbd><kbd>↑</kbd><kbd>↓</kbd><kbd>→</kbd> крестовина · <kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> кнопки A B C · <kbd>Q</kbd><kbd>W</kbd><kbd>E</kbd> X Y Z · <kbd>Enter</kbd> Start · <kbd>Esc</kbd> это меню<br><b>Геймпад:</b> подключите и нажмите любую кнопку. Крестовина или стик, три кнопки — A B C, Start, кнопка «домой» — меню',
